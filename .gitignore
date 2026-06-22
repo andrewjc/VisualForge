@@ -1,0 +1,23 @@
+/build/
+/build-*/
+/out/
+/artifacts/
+/.vs/
+/Testing/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.log
+*.dmp
+
+# Dependencies cloned from upstream, each with its own history and remote.
+# Committing them here would store them as gitlinks with no .gitmodules, which
+# is a reference that breaks on clone rather than a copy of the code. The
+# vendored copies that are plain source (imgui, minhook, extern) stay tracked.
+#   Catch2  https://github.com/catchorg/Catch2.git  8b08d4d79514f45f7e4ce2a607ac9c94e920d1bb
+#   common  https://github.com/ianpatt/common.git   64e233c096735551f6ac9a773726a8a3960e46cd
+#   f4se    https://github.com/ianpatt/f4se.git     cb39721a8155b0ec31640291f2997fa1c43474af
+/external/Catch2/
+/external/common/
+/external/f4se/
