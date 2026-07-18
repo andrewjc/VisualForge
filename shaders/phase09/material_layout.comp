@@ -1,0 +1,49 @@
+#version 460
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+struct GpuMaterialStaticV1
+{
+    uvec2 materialId;
+    uint staticRevision;
+    uint flags;
+    uvec4 textureIndices;
+    vec2 uvScale;
+    vec2 uvOffset;
+    vec3 specularColor;
+    float reserved;
+};
+
+struct GpuMaterialDynamicV1
+{
+    uvec2 materialId;
+    uint materialRevision;
+    uint staticRevision;
+    vec4 parameters;
+    float alphaCutoff;
+    uint transferVersion;
+    uvec2 reserved;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer StaticMaterials
+{
+    GpuMaterialStaticV1 records[];
+} staticMaterials;
+
+layout(set = 0, binding = 1, std430) readonly buffer DynamicMaterials
+{
+    GpuMaterialDynamicV1 records[];
+} dynamicMaterials;
+
+layout(set = 0, binding = 2, std430) writeonly buffer LayoutProbe
+{
+    vec4 values[];
+} layoutProbe;
+
+void main()
+{
+    const uint index = gl_GlobalInvocationID.x;
+    layoutProbe.values[index] = vec4(
+        staticMaterials.records[index].uvScale,
+        dynamicMaterials.records[index].parameters.xy);
+}
