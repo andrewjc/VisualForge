@@ -1,0 +1,71 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "scene_layout.glsl"
+
+// Layout probe only. The mirrored G-buffer is written through color
+// attachments, but the readback interleave must match this record exactly,
+// so the byte layout is reflected here and asserted against the CPU
+// contract at build time.
+struct GpuGBufferPixelV1
+{
+    vec4 albedo;
+    vec4 geometricNormalRoughness;
+    vec4 shadingNormalDepth;
+    uvec2 objectId;
+    uvec2 materialId;
+};
+
+layout(set = 0, binding = 8, std430) buffer SceneGBufferLayout
+{
+    GpuGBufferPixelV1 pixels[];
+} sceneGBufferLayout;
+
+layout(local_size_x = 1) in;
+
+void main()
+{
+    if (gl_GlobalInvocationID.x == 0u) {
+        sceneGBufferLayout.pixels[0].objectId =
+            sceneInstances.records[scenePush.firstInstance].objectId;
+        sceneGBufferLayout.pixels[0].materialId =
+            opaqueObjects.records[scenePush.objectIndex].materialId;
+        sceneGBufferLayout.pixels[0].albedo =
+            sceneInstances.records[scenePush.firstInstance].parameters;
+        // Reflects the Phase 15 visibility record so its size and binding
+        // are asserted against the CPU contract at build time.
+        GpuVisibilityRecordV1 visible =
+            sceneVisibility.records[scenePush.objectIndex];
+        sceneGBufferLayout.pixels[0].shadingNormalDepth = vec4(
+            visible.alphaReference, visible.alphaConstant,
+            visible.modelDeterminant,
+            float(vfAlphaClass(visible) + vfFaceMode(visible)));
+        // Reflects the Phase 17 light and environment records so their sizes
+        // and bindings are asserted against the CPU contract at build time.
+        GpuLightRecordV1 light = sceneLights.records[scenePush.objectIndex];
+        GpuEnvironmentV1 environment = sceneEnvironment.record;
+        sceneGBufferLayout.pixels[0].albedo +=
+            light.color + light.position + light.direction +
+            light.attenuation + light.cone +
+            environment.ambientAndFogNear +
+            environment.sunDirectionAndFogFar +
+            environment.sunColorAndIntensity +
+            environment.moonDirectionAndIntensity +
+            environment.moonColorAndFogMaximum +
+            environment.fogColorAndPower +
+            vec4(environment.flagsAndCount);
+        // Reflects the Phase 16 family record so its size and binding are
+        // asserted against the CPU contract at build time.
+        GpuFamilyRecordV1 family =
+            sceneFamilies.records[scenePush.objectIndex];
+        sceneGBufferLayout.pixels[0].geometricNormalRoughness =
+            family.emissionColor + family.tintColor + family.subsurface +
+            family.parallax + family.eyeCenterRadius + family.layerAndEye +
+            family.wetnessLow + family.wetnessHigh +
+            vec4(float(vfMaterialFamily(family)),
+                float(vfShaderClass(family)),
+                float(vfNormalEncoding(family)),
+                float(family.featureFlags + family.emissionFlags +
+                    family.paletteFlags));
+    }
+}
