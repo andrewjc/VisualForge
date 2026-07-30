@@ -1,0 +1,92 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "deform_layout.glsl"
+
+layout(local_size_x = 64) in;
+
+vec3 LoadBasePosition(uint index)
+{
+    return vec3(
+        baseVertices.records[index].position[0],
+        baseVertices.records[index].position[1],
+        baseVertices.records[index].position[2]);
+}
+
+vec3 TransformPoint(GpuBoneTransformV1 bone, vec3 point)
+{
+    vec4 homogeneous = vec4(point, 1.0);
+    return vec3(
+        dot(bone.rows[0], homogeneous),
+        dot(bone.rows[1], homogeneous),
+        dot(bone.rows[2], homogeneous));
+}
+
+// Morph accumulation happens in bind space, then skinning, then wind. The
+// previous pose runs the same order with the previous inputs.
+vec3 Morph(uint vertexIndex, vec3 basePosition, bool previous)
+{
+    vec3 result = basePosition;
+    for (uint target = 0u; target < deformPush.morphTargetCount; ++target) {
+        GpuMorphTargetV1 record = morphTargets.records[target];
+        float weight = previous ? record.previousWeight : record.weight;
+        if (weight == 0.0) {
+            continue;
+        }
+        for (uint element = 0u; element < record.deltaCount; ++element) {
+            GpuMorphDeltaV1 delta =
+                morphDeltas.records[record.firstDelta + element];
+            if (delta.vertexIndex.x != vertexIndex) {
+                continue;
+            }
+            result += weight * delta.delta.xyz;
+        }
+    }
+    return result;
+}
+
+vec3 Pose(uint vertexIndex, vec3 morphed, bool previous)
+{
+    GpuDeformVertexV1 influence = deformVertices.records[vertexIndex];
+    float total = influence.weights.x + influence.weights.y +
+        influence.weights.z + influence.weights.w;
+    vec3 skinned = vec3(0.0);
+    for (uint slot = 0u; slot < 4u; ++slot) {
+        float weight = influence.weights[slot] / total;
+        if (weight == 0.0) {
+            continue;
+        }
+        uint boneIndex = influence.bones[slot];
+        GpuBoneTransformV1 bone = previous
+            ? previousBones.records[boneIndex]
+            : bones.records[boneIndex];
+        skinned += weight * TransformPoint(bone, morphed);
+    }
+    float flexibility = influence.flexibility.x;
+    if (deformPush.amplitude != 0.0 && flexibility != 0.0) {
+        float windTime = previous ? deformPush.previousTime
+                                  : deformPush.time;
+        float phase = deformPush.frequency * windTime +
+            dot(deformPush.direction.xyz, morphed);
+        skinned += flexibility * deformPush.amplitude * sin(phase) *
+            deformPush.direction.xyz;
+    }
+    return skinned;
+}
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= deformPush.vertexCount) {
+        return;
+    }
+    vec3 basePosition = LoadBasePosition(index);
+    vec3 current = Pose(index, Morph(index, basePosition, false), false);
+    vec3 previous = Pose(index, Morph(index, basePosition, true), true);
+
+    deformedVertices.records[index] = baseVertices.records[index];
+    deformedVertices.records[index].position[0] = current.x;
+    deformedVertices.records[index].position[1] = current.y;
+    deformedVertices.records[index].position[2] = current.z;
+    previousPositions.records[index] = vec4(previous, 1.0);
+}
