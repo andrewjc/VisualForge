@@ -1,0 +1,22 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// Reflection source for the Phase 14 terrain layout header. It exists so the
+// generated C++ record sizes and bindings come from compiled SPIR-V instead
+// of a hand-maintained duplicate.
+#include "terrain_layout.glsl"
+
+layout(local_size_x = 1) in;
+
+void main()
+{
+    GpuTerrainCellV1 cellRecord = terrainCells.records[terrainPush.cellIndex];
+    uint slot = min(cellRecord.layerSlotCount, kVfLandChannelsPerVertex - 1u);
+    GpuLandscapeLayerV1 layer =
+        terrainLayers.records[vfTerrainLayerIndex(cellRecord, slot)];
+    vec4 sampled = textureLod(terrainLayerTextures,
+        vec3(layer.uvScale / kVfCellWorldSize, float(layer.arraySlice)), 0.0);
+    if (sampled.a < 0.0 || cellRecord.cameraRelativeOrigin.w < 0.0) {
+        return;
+    }
+}
