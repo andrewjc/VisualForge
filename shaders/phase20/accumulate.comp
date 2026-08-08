@@ -1,0 +1,84 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "accumulate_layout.glsl"
+#include "temporal.glsl"
+
+// The temporal half of the indirect pass: one invocation per pixel, folding
+// this frame's traced sample into the history the previous frame left, and
+// publishing the variance the spatial filter needs.
+//
+// A pass over pixels rather than over geometry, which is why it is compute
+// rather than part of the raster pipeline. Every rule it applies lives in
+// temporal.glsl beside its host original, so the device and the oracle cannot
+// drift by interpretation.
+layout(local_size_x = 64) in;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= indirectPush.pixelCount) {
+        return;
+    }
+
+    uvec2 extent = uvec2(indirectPush.width, indirectPush.height);
+    // Recovered from the flat index rather than dispatched two-dimensionally,
+    // so a caller cannot supply an extent that disagrees with the buffer it
+    // also supplied.
+    uvec2 pixel = extent.x == 0u
+        ? uvec2(0u, 0u)
+        : uvec2(index % extent.x, index / extent.x);
+
+    GpuIndirectPixelV1 current = indirectCurrent.records[index];
+
+    uvec2 source;
+    uint reason = vfReprojectIndirect(
+        current.normal,
+        indirectPrevious.records[index].normal,
+        current.depth,
+        indirectPrevious.records[index].depth,
+        uvec2(current.objectId.x, current.materialId.x),
+        uvec2(indirectPrevious.records[index].objectId.x,
+              indirectPrevious.records[index].materialId.x),
+        current.motion,
+        pixel,
+        extent,
+        indirectPush.epochMatches != 0u,
+        source);
+
+    // The high halves of both identities, tested separately. Folding all four
+    // words into one comparison would let a difference in the high half of the
+    // object cancel against one in the low half of the material.
+    if (reason == kVfRejectAccepted) {
+        if (current.objectId.y != indirectPrevious.records[index].objectId.y) {
+            reason = kVfRejectObject;
+        } else if (current.materialId.y !=
+                   indirectPrevious.records[index].materialId.y) {
+            reason = kVfRejectMaterial;
+        }
+    }
+
+    // The history is read from the pixel the reprojection named, not from this
+    // one. Reading this pixel's own history would make the whole gate
+    // pointless: it would always agree with itself and nothing would ever be
+    // rejected for having moved.
+    uint historyIndex = reason == kVfRejectAccepted
+        ? (source.y * extent.x + source.x)
+        : index;
+    GpuIndirectHistoryV1 stored = indirectHistory.records[historyIndex];
+
+    VfIndirectHistory history;
+    history.mean = stored.mean;
+    history.secondMoment = stored.secondMoment;
+    history.samples = stored.samples;
+
+    VfIndirectHistory updated = vfAccumulateIndirect(
+        history, vfClampIndirect(current.radiance), reason);
+
+    GpuIndirectResultV1 result;
+    result.mean = updated.mean;
+    result.reason = reason;
+    result.variance = vfIndirectVariance(updated);
+    result.samples = updated.samples;
+    indirectResults.records[index] = result;
+}
