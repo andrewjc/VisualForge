@@ -177,6 +177,13 @@ std::atomic<std::uint64_t> s_shadersFailed{};
 std::atomic<std::uint32_t> s_reflectLayoutOverflow{};
 std::atomic<std::uint32_t> s_fieldOverflow{};
 
+// The texture/sampler bindings the engine's own pixel shaders declare,
+// collapsed the same way the constant-buffer catalogue is: by exact name and
+// slot, with a per-entry count of how many shaders share that declaration.
+std::array<ShaderResourceBinding, kShaderResourceCapacity> s_shaderResources{};
+std::uint32_t s_shaderResourceCount = 0;
+std::atomic<std::uint32_t> s_shaderResourceOverflow{};
+
 void CopyName(char (&destination)[64], const std::string& source) noexcept
 {
     const std::size_t length = std::min(source.size(), sizeof(destination) - 1);
@@ -239,6 +246,30 @@ void RecordShaderReflection(
                 field.offset = variable.offset;
                 field.size = variable.size;
             }
+        }
+        ++slot->shaders;
+    }
+
+    for (const auto& resource : reflection.resources) {
+        ShaderResourceBinding* slot = nullptr;
+        for (std::uint32_t index = 0; index < s_shaderResourceCount; ++index) {
+            auto& existing = s_shaderResources[index];
+            if (existing.bindPoint == resource.bindPoint &&
+                std::strcmp(existing.name, resource.name.c_str()) == 0) {
+                slot = &existing;
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            if (s_shaderResourceCount >= kShaderResourceCapacity) {
+                s_shaderResourceOverflow.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            slot = &s_shaderResources[s_shaderResourceCount++];
+            CopyName(slot->name, resource.name);
+            slot->kind = static_cast<std::uint8_t>(resource.kind);
+            slot->bindPoint = resource.bindPoint;
+            slot->bindCount = resource.bindCount;
         }
         ++slot->shaders;
     }
@@ -943,6 +974,20 @@ std::size_t CopyShaderBufferLayouts(
     return written;
 }
 
+std::size_t CopyShaderResourceBindings(
+    ShaderResourceBinding* const destination,
+    const std::size_t capacity) noexcept
+{
+    if (destination == nullptr) return 0;
+    const std::lock_guard<std::mutex> guard{s_reflectionMutex};
+    const std::size_t written =
+        std::min(capacity, static_cast<std::size_t>(s_shaderResourceCount));
+    for (std::size_t index = 0; index < written; ++index) {
+        destination[index] = s_shaderResources[index];
+    }
+    return written;
+}
+
 ShaderReflectionStats ShaderReflectionCounters() noexcept
 {
     ShaderReflectionStats stats{};
@@ -951,9 +996,11 @@ ShaderReflectionStats ShaderReflectionCounters() noexcept
     stats.failed = s_shadersFailed.load(std::memory_order_relaxed);
     stats.layoutOverflow = s_reflectLayoutOverflow.load(std::memory_order_relaxed);
     stats.fieldOverflow = s_fieldOverflow.load(std::memory_order_relaxed);
+    stats.resourceOverflow = s_shaderResourceOverflow.load(std::memory_order_relaxed);
     {
         const std::lock_guard<std::mutex> guard{s_reflectionMutex};
         stats.layouts = s_shaderBufferCount;
+        stats.resources = s_shaderResourceCount;
     }
     return stats;
 }

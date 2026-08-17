@@ -778,14 +778,20 @@ bool BuildLiveSceneGeometry(
                 engine_draw_capture::kShaderBufferLayoutCapacity> layouts{};
             const auto layoutCount = engine_draw_capture::CopyShaderBufferLayouts(
                 layouts.data(), layouts.size());
+            static std::array<engine_draw_capture::ShaderResourceBinding,
+                engine_draw_capture::kShaderResourceCapacity> resources{};
+            const auto resourceCount = engine_draw_capture::CopyShaderResourceBindings(
+                resources.data(), resources.size());
             const auto reflection = engine_draw_capture::ShaderReflectionCounters();
             log::Write("renderer-reflect: shaders=%llu reflected=%llu failed=%llu "
-                "layouts=%u layout-overflow=%u field-overflow=%u",
+                "layouts=%u layout-overflow=%u field-overflow=%u resources=%u "
+                "resource-overflow=%u",
                 static_cast<unsigned long long>(reflection.shaders),
                 static_cast<unsigned long long>(reflection.reflected),
                 static_cast<unsigned long long>(reflection.failed),
                 reflection.layouts, reflection.layoutOverflow,
-                reflection.fieldOverflow);
+                reflection.fieldOverflow, reflection.resources,
+                reflection.resourceOverflow);
             for (std::size_t index = 0; index < layoutCount; ++index) {
                 const auto& layout = layouts[index];
                 log::Write("renderer-reflect-buffer: name=%s bytes=%u fields=%u "
@@ -797,6 +803,26 @@ bool BuildLiveSceneGeometry(
                     log::Write("renderer-reflect-field: %s.%s offset=%u size=%u",
                         layout.name, entry.name, entry.offset, entry.size);
                 }
+            }
+            // Printed under its own prefix so a live run can be checked for
+            // plausibility before this is trusted for anything: real names,
+            // small bind points, texture/sampler pairs sharing a slot. The
+            // constant-buffer offsets above were wrong once and only caught
+            // by reading real captured bytes -- this is that same check for
+            // the bound-resource table, which has not yet had one.
+            for (std::size_t index = 0; index < resourceCount; ++index) {
+                const auto& resource = resources[index];
+                const char* kind = resource.kind ==
+                        static_cast<std::uint8_t>(shader::ResourceKind::Texture)
+                    ? "texture"
+                    : resource.kind ==
+                        static_cast<std::uint8_t>(shader::ResourceKind::Sampler)
+                    ? "sampler"
+                    : "other";
+                log::Write("renderer-reflect-resource: name=%s kind=%s slot=%u "
+                    "count=%u shaders=%llu", resource.name, kind,
+                    resource.bindPoint, resource.bindCount,
+                    static_cast<unsigned long long>(resource.shaders));
             }
         }
 

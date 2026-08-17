@@ -78,6 +78,19 @@ constexpr std::size_t kVariableEntrySizeSm5 = 40;
     return false;
 }
 
+// D3D_SHADER_INPUT_TYPE. Only the values this reader distinguishes are named;
+// everything else (constant buffers, UAVs, structured buffers) is kept as
+// ResourceKind::Other rather than dropped, because a resource this reader
+// does not care about is still a real declaration and undercounting the
+// table is its own kind of wrong answer.
+constexpr std::uint32_t kShaderInputTypeTexture = 2;
+constexpr std::uint32_t kShaderInputTypeSampler = 3;
+
+// A D3D11_SHADER_INPUT_BIND_DESC record: name offset, type, return type,
+// dimension, sample count, bind point, bind count, flags. Unlike constant
+// buffer variables this record does not grow between SM4 and SM5.
+constexpr std::size_t kResourceEntrySize = 32;
+
 [[nodiscard]] ReflectionError ReadReflectionChunk(
     std::span<const std::byte> chunk, ReflectedShader& reflection)
 {
@@ -87,10 +100,35 @@ constexpr std::size_t kVariableEntrySizeSm5 = 40;
 
     const std::uint32_t bufferCount = ReadU32(chunk, 0);
     const std::uint32_t bufferOffset = ReadU32(chunk, 4);
+    const std::uint32_t resourceCount = ReadU32(chunk, 8);
+    const std::uint32_t resourceOffset = ReadU32(chunk, 12);
     const auto majorVersion = static_cast<std::uint8_t>(chunk[17]);
 
     if (RegionOutOfBounds(chunk.size(), bufferOffset, bufferCount, kBufferEntrySize)) {
         return ReflectionError::InvalidOffset;
+    }
+    if (RegionOutOfBounds(
+            chunk.size(), resourceOffset, resourceCount, kResourceEntrySize)) {
+        return ReflectionError::InvalidOffset;
+    }
+
+    reflection.resources.clear();
+    reflection.resources.reserve(resourceCount);
+    for (std::uint32_t index = 0; index < resourceCount; ++index) {
+        const std::size_t entry =
+            static_cast<std::size_t>(resourceOffset) + index * kResourceEntrySize;
+
+        ReflectedResource resource{};
+        if (!ReadName(chunk, ReadU32(chunk, entry), resource.name)) {
+            return ReflectionError::InvalidOffset;
+        }
+        const auto type = ReadU32(chunk, entry + 4);
+        resource.kind = type == kShaderInputTypeTexture ? ResourceKind::Texture
+            : type == kShaderInputTypeSampler            ? ResourceKind::Sampler
+                                                           : ResourceKind::Other;
+        resource.bindPoint = ReadU32(chunk, entry + 20);
+        resource.bindCount = ReadU32(chunk, entry + 24);
+        reflection.resources.push_back(std::move(resource));
     }
 
     const std::size_t variableStride =

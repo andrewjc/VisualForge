@@ -51,9 +51,29 @@ struct ReflectedBuffer
     std::vector<ReflectedVariable> variables;
 };
 
+// A texture or sampler the shader declares, with the register it binds to.
+// D3D_SIT_TEXTURE and D3D_SIT_SAMPLER are 2 and 3 in the D3D_SHADER_INPUT_TYPE
+// enum this is read from; other input types (constant buffers, UAVs) are
+// skipped, since nothing here consumes them.
+enum class ResourceKind : std::uint8_t
+{
+    Texture,
+    Sampler,
+    Other,
+};
+
+struct ReflectedResource
+{
+    std::string name;
+    ResourceKind kind{ResourceKind::Other};
+    std::uint32_t bindPoint{};
+    std::uint32_t bindCount{};
+};
+
 struct ReflectedShader
 {
     std::vector<ReflectedBuffer> buffers;
+    std::vector<ReflectedResource> resources;
 };
 
 // Reads the reflection chunk out of a DXBC container.

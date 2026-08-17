@@ -45,15 +45,34 @@ struct BufferSpec
     std::vector<VariableSpec> variables;
 };
 
+// D3D_SHADER_INPUT_TYPE. Only the two this parser cares about are named; the
+// fixture uses the raw values for everything else, matching what a real
+// compiler emits for constant buffers (0) and UAVs.
+constexpr std::uint32_t kSitTexture = 2;
+constexpr std::uint32_t kSitSampler = 3;
+
+struct ResourceSpec
+{
+    std::string name;
+    std::uint32_t type{};
+    std::uint32_t bindPoint{};
+    std::uint32_t bindCount{1};
+};
+
 // Builds the reflection chunk body the way the compiler lays it out: a fixed
-// header, then the buffer table, then each buffer's variable table, then every
-// name in one string pool at the end.
+// header, the bound-resource table, the buffer table, then each buffer's
+// variable table, then every name in one string pool at the end.
 [[nodiscard]] std::vector<std::byte> BuildReflectionChunk(
-    const std::vector<BufferSpec>& buffers, const std::uint8_t majorVersion)
+    const std::vector<BufferSpec>& buffers,
+    const std::uint8_t majorVersion,
+    const std::vector<ResourceSpec>& resources = {})
 {
     const std::size_t variableStride = majorVersion >= 5 ? 40u : 24u;
+    constexpr std::size_t kResourceEntrySize = 32;
     const std::size_t headerSize = 28;
-    const std::size_t bufferTable = headerSize;
+    const std::size_t resourceTable = headerSize;
+    const std::size_t resourceTableBytes = resources.size() * kResourceEntrySize;
+    const std::size_t bufferTable = resourceTable + resourceTableBytes;
     const std::size_t bufferTableBytes = buffers.size() * 24;
 
     std::size_t variableTable = bufferTable + bufferTableBytes;
@@ -73,6 +92,18 @@ struct BufferSpec
         names.push_back(std::byte{0});
         return offset;
     };
+
+    std::vector<std::byte> resourceEntries;
+    for (const auto& resource : resources) {
+        AppendU32(resourceEntries, intern(resource.name));
+        AppendU32(resourceEntries, resource.type);
+        AppendU32(resourceEntries, 0);  // return type
+        AppendU32(resourceEntries, 4);  // dimension: TEXTURE2D
+        AppendU32(resourceEntries, 0);  // sample count
+        AppendU32(resourceEntries, resource.bindPoint);
+        AppendU32(resourceEntries, resource.bindCount);
+        AppendU32(resourceEntries, 0);  // flags
+    }
 
     std::vector<std::byte> table;
     std::vector<std::byte> variables;
@@ -99,8 +130,8 @@ struct BufferSpec
     std::vector<std::byte> chunk;
     AppendU32(chunk, static_cast<std::uint32_t>(buffers.size()));
     AppendU32(chunk, static_cast<std::uint32_t>(bufferTable));
-    AppendU32(chunk, 0);  // bound resource count
-    AppendU32(chunk, 0);  // bound resource offset
+    AppendU32(chunk, static_cast<std::uint32_t>(resources.size()));
+    AppendU32(chunk, static_cast<std::uint32_t>(resourceTable));
     chunk.push_back(std::byte{0});             // minor version
     chunk.push_back(std::byte{majorVersion});  // major version
     chunk.push_back(std::byte{0xFF});          // shader type: pixel
@@ -108,6 +139,7 @@ struct BufferSpec
     AppendU32(chunk, 0);  // flags
     AppendU32(chunk, 0);  // creator offset
 
+    chunk.insert(chunk.end(), resourceEntries.begin(), resourceEntries.end());
     chunk.insert(chunk.end(), table.begin(), table.end());
     chunk.insert(chunk.end(), variables.begin(), variables.end());
     chunk.insert(chunk.end(), names.begin(), names.end());
@@ -148,9 +180,12 @@ struct BufferSpec
 }
 
 [[nodiscard]] std::vector<std::byte> BuildShader(
-    const std::vector<BufferSpec>& buffers, const std::uint8_t majorVersion = 5)
+    const std::vector<BufferSpec>& buffers,
+    const std::uint8_t majorVersion = 5,
+    const std::vector<ResourceSpec>& resources = {})
 {
-    return BuildContainer({{0x46454452u, BuildReflectionChunk(buffers, majorVersion)}});
+    return BuildContainer(
+        {{0x46454452u, BuildReflectionChunk(buffers, majorVersion, resources)}});
 }
 
 const std::vector<BufferSpec> kLightingLikeShader{
@@ -410,6 +445,92 @@ TEST_CASE("malformed shader bytecode is refused rather than parsed")
         for (std::size_t index = poolStart; index < body + chunkSize; ++index) {
             bytecode[index] = std::byte{'A'};
         }
+        ReflectedShader reflection{};
+        CHECK(ReflectShader(bytecode, reflection) == ReflectionError::InvalidOffset);
+    }
+}
+
+TEST_CASE("a shader names its own bound textures and samplers")
+{
+    // The constant-buffer work found the sun, but it could not find which PS
+    // shader-resource slot a draw's base-colour texture is bound at: the
+    // engine has no single fixed convention, and asking a live capture "what
+    // is bound at slot 0" answers a different question for every technique.
+    // The bind point is a property of the shader that declares it, the same
+    // way a constant's offset is -- so it is read the same way.
+    const std::vector<ResourceSpec> resources{
+        {"BaseColorTexture", kSitTexture, 3},
+        {"BaseColorSampler", kSitSampler, 3},
+        {"NormalTexture", kSitTexture, 4},
+    };
+
+    SECTION("name, kind and bind point are recovered for every resource")
+    {
+        const auto bytecode = BuildShader(kLightingLikeShader, 5, resources);
+        ReflectedShader reflection{};
+        REQUIRE(ReflectShader(bytecode, reflection) == ReflectionError::None);
+
+        REQUIRE(reflection.resources.size() == 3);
+        CHECK(reflection.resources[0].name == "BaseColorTexture");
+        CHECK(reflection.resources[0].kind == ResourceKind::Texture);
+        CHECK(reflection.resources[0].bindPoint == 3);
+        CHECK(reflection.resources[1].name == "BaseColorSampler");
+        CHECK(reflection.resources[1].kind == ResourceKind::Sampler);
+        CHECK(reflection.resources[1].bindPoint == 3);
+        CHECK(reflection.resources[2].name == "NormalTexture");
+        CHECK(reflection.resources[2].kind == ResourceKind::Texture);
+        CHECK(reflection.resources[2].bindPoint == 4);
+        // The constant buffers this same shader declares are unaffected --
+        // the two tables are independent, and a bug that let one overwrite
+        // the other would still pass a test that only ever looked at one.
+        REQUIRE(reflection.buffers.size() == 2);
+        CHECK(reflection.buffers[0].name == "PerGeometry");
+    }
+
+    SECTION("a resource type this parser does not name is kept, not dropped")
+    {
+        // A constant buffer or a UAV entry in the same table is not a texture
+        // or a sampler, but it is still a real declaration, and silently
+        // dropping it would undercount how many resources the shader has.
+        const std::vector<ResourceSpec> mixed{
+            {"BaseColorTexture", kSitTexture, 0},
+            {"SomeConstantBuffer", /*D3D_SIT_CBUFFER=*/0, 1},
+        };
+        const auto bytecode = BuildShader({}, 5, mixed);
+        ReflectedShader reflection{};
+        REQUIRE(ReflectShader(bytecode, reflection) == ReflectionError::None);
+        REQUIRE(reflection.resources.size() == 2);
+        CHECK(reflection.resources[0].kind == ResourceKind::Texture);
+        CHECK(reflection.resources[1].kind == ResourceKind::Other);
+    }
+
+    SECTION("a shader with no bound resources reflects as empty")
+    {
+        const auto bytecode = BuildShader(kLightingLikeShader, 5, {});
+        ReflectedShader reflection{};
+        REQUIRE(ReflectShader(bytecode, reflection) == ReflectionError::None);
+        CHECK(reflection.resources.empty());
+    }
+
+    SECTION("a resource count that overruns its table is refused")
+    {
+        auto bytecode = BuildShader(kLightingLikeShader, 5, resources);
+        const std::size_t body = ReadU32(bytecode, 32) + 8;
+        // Offset 8 within the chunk header is resourceCount, not bufferCount
+        // (offset 0) -- writing to the wrong one exercises the buffer-table
+        // bound this test does not claim to cover, and would pass even with
+        // the resource-table bound deleted entirely.
+        WriteU32(bytecode, body + 8, 0xFFFFFFFFu);
+        ReflectedShader reflection{};
+        CHECK(ReflectShader(bytecode, reflection) == ReflectionError::InvalidOffset);
+    }
+
+    SECTION("a resource name offset past the end of the chunk is refused")
+    {
+        auto bytecode = BuildShader(kLightingLikeShader, 5, resources);
+        const std::size_t body = ReadU32(bytecode, 32) + 8;
+        const std::size_t resourceTable = body + 28;
+        WriteU32(bytecode, resourceTable, 0xFFFFFFFFu);
         ReflectedShader reflection{};
         CHECK(ReflectShader(bytecode, reflection) == ReflectionError::InvalidOffset);
     }

@@ -171,6 +171,30 @@ constexpr std::size_t kShaderBufferLayoutCapacity = 64;
     ShaderBufferLayout* destination,
     std::size_t capacity) noexcept;
 
+// A texture or sampler a shader declares, and the register it binds to. The
+// engine has no fixed convention for which PS shader-resource slot carries a
+// draw's base-colour texture -- it depends on which technique is bound, the
+// same way the lighting constant's offset did -- so the slot is read from
+// each shader's own declaration rather than assumed.
+struct ShaderResourceBinding
+{
+    char name[64]{};
+    std::uint8_t kind{};  // matches renderer::shader::ResourceKind
+    std::uint32_t bindPoint{};
+    std::uint32_t bindCount{};
+    // How many distinct shaders bind a resource under this exact name and
+    // slot. A name reused at the same slot across many techniques is the
+    // engine's own naming convention holding; the same name at two different
+    // slots is two different declarations and is kept as two entries.
+    std::uint64_t shaders{};
+};
+
+constexpr std::size_t kShaderResourceCapacity = 128;
+
+[[nodiscard]] std::size_t CopyShaderResourceBindings(
+    ShaderResourceBinding* destination,
+    std::size_t capacity) noexcept;
+
 // Why the catalogue looks the way it does. `shaders` at zero means the hook
 // was installed after the engine compiled its shaders, which is a different
 // problem from bytecode that would not parse.
@@ -182,6 +206,8 @@ struct ShaderReflectionStats
     std::uint32_t layouts{};
     std::uint32_t layoutOverflow{};
     std::uint32_t fieldOverflow{};
+    std::uint32_t resources{};
+    std::uint32_t resourceOverflow{};
 };
 
 [[nodiscard]] ShaderReflectionStats ShaderReflectionCounters() noexcept;

@@ -3190,3 +3190,116 @@ explanation. Also unresolved: the mirror dump races the harness's PPM/PNG
 conversion, so a live frame cannot be relied on to hold geometry -- which is
 why the end of this chain is pinned by a deterministic test that shades two
 opposed normals rather than by a screenshot.
+
+## Per-draw material textures: the CPU-side contract (2026-08-17)
+
+Resuming task #27. The packet, ABI, and CPU-oracle layers are done,
+red-green-refactor with mutation testing throughout. 373/373 in both
+configurations.
+
+- **`RasterMaterialV1` carries a `textureIndex`.** Grew from 32 to 48 bytes
+  (`kPacketMaterialTextureVersionMinor = 3`). `kNoMaterialTexture =
+  0xFFFF'FFFFu` is the sentinel, not zero -- zero is the first real slot in a
+  frame's texture library, and a material that defaulted to it would silently
+  sample whatever texture happened to be uploaded first. The sentinel is
+  pinned by its literal bit pattern, not compared against its own symbol,
+  after a first version of that test proved unable to catch a mutation that
+  redefined the constant globally -- both sides of the equality moved
+  together.
+- **`RasterFrameRequestV1` carries `textureLibraryData`/`textureLibrarySize`**
+  (`kBackendAbiTextureLibraryMinor = 13`), following the `lightData`/
+  `lightSize` precedent exactly: caller data, not a backend-owned fallback.
+- **`RenderReferenceTextureLibrary`** is the new CPU oracle: each draw's
+  material selects its own texture from a supplied library by index, or
+  shades flat from `baseColor` at the sentinel. This is what the Vulkan
+  descriptor-indexed array will be checked against. An out-of-range index is
+  refused (`UnsupportedState`), not guessed at.
+
+Two knock-on test failures from the version bump, both the same shape as an
+earlier lesson in this project: a test that pins an exact version number or
+exact struct size goes stale the moment anything else in the packet grows.
+Both changed to `>=`/`<=` against the specific floor each test actually cares
+about, with a new exact-pin test added for the texture library's own tail
+(matching the `P17`/`P20`/`P23` "prefix drift" pattern already established).
+
+One fixture bug caught by its own symptom, not by inspection: a hand-built
+two-triangle test packet (left material -> red texture, right material ->
+blue texture) initially read pure background at both sample points. The
+vertex order was the mirror image of the known-good phase6 fixture --
+CCW in the working example is the wide pair at negative NDC y and the apex at
+positive NDC y; this fixture had them swapped, which rasterizes as clockwise
+and is silently dropped by the default `FrontFace::CounterClockwise`. Fixed by
+matching the known-good order exactly rather than reasoning about it fresh.
+
+### Not yet done
+
+- The plugin does not yet resolve a real per-draw texture index from the
+  engine -- `PSSetShaderResources` (device context slot 8, already confirmed
+  in this build's vtable) is not hooked, and nothing in `RendererBackendProbe`
+  populates `textureLibraryData` or writes a non-sentinel `textureIndex`.
+- The Vulkan backend still binds one material bundle (bindings 1..3) for the
+  whole frame. `GenerateRasterShaderLayout.cmake` still gates the reflection
+  on exactly one combined-image-sampler at binding 1, and `phase11/scene.frag`
+  still declares `uniform sampler2D baseTexture` rather than an array. Neither
+  has been touched yet -- this is real GPU/shader surface, not a small step,
+  and needs `VK_EXT_descriptor_indexing` wired through capability negotiation
+  before the array binding itself.
+
+## The base-colour texture slot is not fixed either, and is now readable (2026-08-17)
+
+Extending the material work: the base-colour texture's PS shader-resource
+slot has no fixed convention in this engine, the same way the lighting
+constant's offset did not. `ShaderReflection` now also parses the RDEF
+bound-resource table (textures and samplers, `D3D11_SHADER_INPUT_BIND_DESC`),
+not just constant buffers -- red-green-refactor with mutation testing on the
+new bounds checks and the texture/sampler discriminator.
+
+**Validated against real Fallout 4 shaders, not just the synthetic fixture**,
+the same discipline the constant-buffer offsets got after the first version
+was wrong:
+
+```
+renderer-reflect-resource: name=tex[0] kind=texture slot=0 count=1 shaders=150
+renderer-reflect-resource: name=sampler_tex[0] kind=sampler slot=0 count=1 shaders=150
+renderer-reflect-resource: name=tex[1] kind=texture slot=1 count=1 shaders=152
+renderer-reflect-resource: name=sampler_tex[1] kind=sampler slot=1 count=1 shaders=152
+```
+
+Every texture/sampler pair lands at the *identical* slot with the *identical*
+shader count -- `tex[0]`/`sampler_tex[0]` both slot 0, both 150 shaders. If
+`bindPoint` (RDEF offset 20) were the wrong field, there is no reason a
+texture and its own sampler would agree on slot *and* usage count; this is
+strong evidence the byte offset is right, not just plausible-looking. `tex[0]`
+at slot 0, used by 150 distinct pixel shaders, is almost certainly the general
+opaque/family material path's base-colour texture -- by far the largest count
+of any texture found. `cbVolume`/`cbPass`/`cbPost`/`Constants` also appear
+here as `kind=other` (D3D_SIT_CBUFFER), with the same names the constant-buffer
+table already reported, which is a second independent cross-check that both
+tables are reading the same shaders correctly.
+
+### What this still does not give the mirror
+
+Knowing "slot 0 is base colour for the shaders that use `tex[0]`" is not yet
+"which texture is bound at slot 0 for *this* draw" -- that requires knowing
+*which pixel shader* is active when a draw fires (not yet hooked: `PSSetShader`
+is unhooked) and reading slot 0 specifically for that shader's declared name,
+not slot 0 unconditionally, since a different technique may use a different
+slot for the same purpose or a different purpose for the same slot.
+
+Also unresolved, discovered while designing the capture hook:
+`EngineTextureCapture` is architecturally a one-shot dump-to-file tool --
+`s_state.candidates` is cleared after one publish and gated permanently by
+`s_state.captured`. It cannot serve as a live, continuously-queried,
+multi-texture store for the mirror; that needs a new always-on residency
+tracker, the texture-side counterpart to `EngineMeshExtractor`/`SceneDatabase`
+for meshes, not a retrofit of the one-shot tool. Not started.
+
+### What is real and shippable right now
+
+The CPU-side material/texture contract, independent of any of the above:
+`RasterMaterialV1::textureIndex`, the ABI's `textureLibraryData`/
+`textureLibrarySize`, and `RenderReferenceTextureLibrary` as the CPU oracle.
+374/374 in both configurations. Nothing in the live engine writes a
+non-sentinel `textureIndex` yet -- the mirror still shades every surface from
+`baseColor` alone, correctly, because that is what "no candidate found" is
+supposed to do.
