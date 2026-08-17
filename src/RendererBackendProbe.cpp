@@ -24,6 +24,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <cmath>
 #include <limits>
 #include <cstddef>
@@ -825,11 +826,30 @@ bool BuildLiveSceneGeometry(
         // Declined rather than guessed at. A mesh whose layout the capture
         // never saw cannot be decoded, and decoding it as three floats is
         // what turned a cell into a fan of spikes.
-        if (!engine_draw_capture::FindInputLayout(held->inputLayout,
-                held->vertexStride, mesh.layout)) {
+        // Memoised per layout and stride. `FindInputLayout` scans a fixed
+        // table of five hundred atomic slots and then *rebuilds* the vertex
+        // layout from its element descriptors, and doing that for all nine
+        // hundred meshes every frame re-derived a few dozen distinct layouts
+        // that never change -- the largest single item left in the frame.
+        static std::map<std::pair<std::uint64_t, std::uint32_t>,
+            std::optional<renderer::mesh::EngineVertexLayout>> layoutCache;
+        const auto key = std::pair{held->inputLayout, held->vertexStride};
+        auto cached = layoutCache.find(key);
+        if (cached == layoutCache.end()) {
+            renderer::mesh::EngineVertexLayout built{};
+            const auto ok = engine_draw_capture::FindInputLayout(
+                held->inputLayout, held->vertexStride, built);
+            // The negative is cached too. A layout the capture never saw is
+            // not going to appear because it was asked for again, and the
+            // scan for it is the expensive case -- it walks every slot.
+            cached = layoutCache.emplace(key,
+                ok ? std::optional{built} : std::nullopt).first;
+        }
+        if (!cached->second.has_value()) {
             ++noLayout;
             continue;
         }
+        mesh.layout = *cached->second;
         mesh.vertices = held->vertices;
         mesh.indices = held->indices;
         // Absent only if the mesh outlived the record that drew it, in which
