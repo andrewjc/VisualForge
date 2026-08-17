@@ -402,6 +402,12 @@ std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 std::uint64_t s_stageGeometryUs = 0;
 // Inside the geometry stage. Every rebuild the goal named is now cached, and
 // what is left has to be attributed rather than guessed at.
+// Whether the packet cache is actually holding. The steady state drifts
+// upward within a run while the mesh set reports unchanged, and a miss count
+// is the difference between "the machine slowed down" and "the key stopped
+// matching".
+std::uint64_t s_encodeHits = 0;
+std::uint64_t s_encodeMisses = 0;
 std::uint64_t s_stageCollectUs = 0;
 std::uint64_t s_stageTranslateUs = 0;
 std::uint64_t s_stageExtractUs = 0;
@@ -1228,6 +1234,17 @@ bool BuildLiveSceneGeometry(
         header.scissorWidth = rasterPacket.header.scissorWidth;
         header.scissorHeight = rasterPacket.header.scissorHeight;
         std::memcpy(packetBytes.data(), &header, sizeof(header));
+    }
+    // Whether the packet cache is actually holding. The steady state drifts
+    // upward within a run while the mesh set reports unchanged, and a miss
+    // count is the difference between "the machine slowed down" and "the key
+    // stopped matching".
+    static std::uint64_t s_encodeHits = 0;
+    static std::uint64_t s_encodeMisses = 0;
+    if (reuseEncoded) {
+        ++s_encodeHits;
+    } else {
+        ++s_encodeMisses;
     }
     const auto encoded = reuseEncoded
         ? raster::PacketResult{raster::PacketError::None, 0}
@@ -2429,6 +2446,11 @@ bool CompositeMirror(
                 window(s_stageExtractUs, s_reportedExtractUs),
                 window(s_stageAssembleUs, s_reportedAssembleUs),
                 window(s_stageCollectUs, s_reportedCollectUs));
+            log::Write("renderer-encode-cache: hits=%llu misses=%llu "
+                "vertices=%zu",
+                static_cast<unsigned long long>(s_encodeHits),
+                static_cast<unsigned long long>(s_encodeMisses),
+                s_assembled.vertices.size());
         }
     }
     return presented;
