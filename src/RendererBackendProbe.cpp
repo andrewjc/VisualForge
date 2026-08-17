@@ -1188,6 +1188,24 @@ bool BuildLiveSceneGeometry(
         // while `never-set` is a thread whose state this module never observed
         // and is the only half that is a defect. The scene-depth split then
         // says whether the nulls are the depth prepass or the shadow cascades.
+        {
+            // Whether the winding a draw carries came from the engine or from
+            // a default. `states=0` or `known=0` means the capture observed
+            // nothing and every draw is using D3D11's default, in which case
+            // the winding is still an assumption wearing a different name.
+            const auto raster = engine_draw_capture::RasterizerState();
+            log::Write("renderer-raster-state: states=%u overflow=%llu "
+                "binds=%llu binds-unmatched=%llu draws-known=%llu "
+                "draws-unknown=%llu front-ccw=%llu front-cw=%llu",
+                raster.statesDescribed,
+                static_cast<unsigned long long>(raster.stateOverflow),
+                static_cast<unsigned long long>(raster.binds),
+                static_cast<unsigned long long>(raster.bindsUnmatched),
+                static_cast<unsigned long long>(raster.drawsKnownCull),
+                static_cast<unsigned long long>(raster.drawsUnknownCull),
+                static_cast<unsigned long long>(raster.drawsFrontCcw),
+                static_cast<unsigned long long>(raster.drawsFrontCw));
+        }
         log::Write("renderer-basecolor-null: no-shader=%llu explicit-null=%llu "
             "never-set=%llu null-scene-depth=%llu null-other-target=%llu",
             static_cast<unsigned long long>(constants.drawsNoShader),

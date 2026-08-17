@@ -107,6 +107,23 @@ inline constexpr std::size_t kDrawArenaCapacity = 8192;
 // scene that is missing objects.
 [[nodiscard]] std::uint32_t LayoutOverflowCount() noexcept;
 
+// What the rasterizer-state capture has actually observed. Reported so that a
+// winding taken "from the engine" can be told from one that fell back to a
+// default because nothing was ever captured.
+struct RasterizerCounters
+{
+    std::uint32_t statesDescribed{};
+    std::uint64_t binds{};
+    std::uint64_t bindsUnmatched{};
+    std::uint64_t drawsKnownCull{};
+    std::uint64_t drawsUnknownCull{};
+    std::uint64_t drawsFrontCcw{};
+    std::uint64_t drawsFrontCw{};
+    std::uint64_t stateOverflow{};
+};
+
+[[nodiscard]] RasterizerCounters RasterizerState() noexcept;
+
 // Why meshes are or are not decodable, as counts rather than as a guess.
 // `recorded` at zero means the hook was installed after the engine built its
 // vertex formats and every mesh will be declined; misses against a healthy

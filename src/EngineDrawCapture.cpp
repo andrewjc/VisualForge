@@ -165,6 +165,18 @@ std::atomic<std::uint64_t> s_rasterizerStateOverflow{};
 // changes by a wide margin, so the table walk is paid per bind.
 thread_local bool t_frontCounterClockwise = false;
 thread_local std::uint32_t t_cullMode = renderer::drawstream::kCullModeUnknown;
+
+// Whether the capture is observing anything at all.
+//
+// Without these, a draw that never saw a rasterizer state and a draw whose
+// state said clockwise are indistinguishable in the output, and replacing a
+// hardcoded winding with an uncaptured one would look exactly like a fix.
+std::atomic<std::uint64_t> s_rasterizerBinds{};
+std::atomic<std::uint64_t> s_rasterizerBindsUnmatched{};
+std::atomic<std::uint64_t> s_drawsKnownCull{};
+std::atomic<std::uint64_t> s_drawsUnknownCull{};
+std::atomic<std::uint64_t> s_drawsFrontCcw{};
+std::atomic<std::uint64_t> s_drawsFrontCw{};
 void* s_setVsConstantBuffersAddress = nullptr;
 void* s_setPsConstantBuffersAddress = nullptr;
 void* s_mapAddress = nullptr;
@@ -908,6 +920,16 @@ void RecordDraw(
     record.baseColorTexture = CurrentBaseColorTexture();
     record.frontCounterClockwise = t_frontCounterClockwise;
     record.cullMode = t_cullMode;
+    if (t_cullMode == renderer::drawstream::kCullModeUnknown) {
+        s_drawsUnknownCull.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        s_drawsKnownCull.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (t_frontCounterClockwise) {
+        s_drawsFrontCcw.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        s_drawsFrontCw.fetch_add(1, std::memory_order_relaxed);
+    }
     t_transformFresh = false;
     std::memcpy(record.model, t_lastTransform, sizeof(record.model));
 }
@@ -1255,8 +1277,10 @@ void __stdcall HookedSetRasterizerState(
             // seen and it said clockwise".
             t_frontCounterClockwise = false;
             t_cullMode = renderer::drawstream::kCullModeUnknown;
+            s_rasterizerBindsUnmatched.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    s_rasterizerBinds.fetch_add(1, std::memory_order_relaxed);
     s_origSetRasterizerState(self, state);
 }
 
@@ -1329,6 +1353,25 @@ LayoutStats LayoutCounters() noexcept
 std::uint32_t LayoutOverflowCount() noexcept
 {
     return s_layoutOverflow.load(std::memory_order_relaxed);
+}
+
+RasterizerCounters RasterizerState() noexcept
+{
+    RasterizerCounters counters{};
+    counters.statesDescribed =
+        s_rasterizerStateCount.load(std::memory_order_relaxed);
+    counters.binds = s_rasterizerBinds.load(std::memory_order_relaxed);
+    counters.bindsUnmatched =
+        s_rasterizerBindsUnmatched.load(std::memory_order_relaxed);
+    counters.drawsKnownCull =
+        s_drawsKnownCull.load(std::memory_order_relaxed);
+    counters.drawsUnknownCull =
+        s_drawsUnknownCull.load(std::memory_order_relaxed);
+    counters.drawsFrontCcw = s_drawsFrontCcw.load(std::memory_order_relaxed);
+    counters.drawsFrontCw = s_drawsFrontCw.load(std::memory_order_relaxed);
+    counters.stateOverflow =
+        s_rasterizerStateOverflow.load(std::memory_order_relaxed);
+    return counters;
 }
 
 bool PrepareHooks(
