@@ -948,6 +948,7 @@ void RecordDraw(
     record.indexOffset = t_currentIndexOffset;
     record.hasTransform = t_transformFresh;
     record.baseColorTexture = CurrentBaseColorTexture();
+    record.hasPixelShader = t_currentPixelShader != 0;
     record.frontCounterClockwise = t_frontCounterClockwise;
     record.cullMode = t_cullMode;
     if (t_cullMode == renderer::drawstream::kCullModeUnknown) {

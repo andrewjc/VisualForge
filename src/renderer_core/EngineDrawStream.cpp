@@ -118,6 +118,7 @@ DrawStreamError ValidateDraw(
         return DrawStreamError::IndexCountOutOfRange;
     }
     if (draw.instanceCount == 0) return DrawStreamError::ZeroInstances;
+    if (!draw.hasPixelShader) return DrawStreamError::DepthOnlyPass;
     if (!draw.hasTransform) return DrawStreamError::NoTransform;
     if (!FiniteModel(draw.model)) {
         return DrawStreamError::NonFiniteTransform;
@@ -610,6 +611,7 @@ const char* ToString(const DrawStreamError error) noexcept
     case DrawStreamError::NoTransform: return "no transform";
     case DrawStreamError::NonAffineTransform: return "non-affine transform";
     case DrawStreamError::MirroredTransform: return "mirrored transform";
+    case DrawStreamError::DepthOnlyPass: return "depth-only pass";
     }
     return "unknown";
 }

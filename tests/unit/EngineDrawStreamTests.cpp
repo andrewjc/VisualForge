@@ -901,3 +901,49 @@ TEST_CASE("P20_assembly_takes_its_winding_from_the_engine_not_a_constant",
     CHECK(assembleWith(true) == raster::FrontFace::CounterClockwise);
     CHECK(assembleWith(false) == raster::FrontFace::Clockwise);
 }
+
+TEST_CASE("P20_depth_only_draws_are_not_world_geometry",
+    "[drawstream][phase20]")
+{
+    // Measured live: 22,320 of 42,590 draws bind no pixel shader. Those are
+    // the depth prepass and the shadow cascades, and a cascade often draws a
+    // different LOD mesh -- which takes its own mesh identity, is textured by
+    // nothing, and renders as a white duplicate of the object beside it.
+    drawstream::DrawRecordV1 draw{};
+    draw.vertexBuffer = 0x1000;
+    draw.indexBuffer = 0x2000;
+    draw.vertexStride = 12;
+    draw.indexCount = 3;
+    draw.instanceCount = 1;
+    draw.hasTransform = true;
+    draw.hasPixelShader = true;
+    draw.model[0] = 1.0f;
+    draw.model[5] = 1.0f;
+    draw.model[10] = 1.0f;
+    draw.model[15] = 1.0f;
+
+    const drawstream::TranslationLimits limits{};
+    REQUIRE(drawstream::ValidateDraw(draw, limits) ==
+        drawstream::DrawStreamError::None);
+
+    // The only field changed is the pixel shader, so the refusal cannot be
+    // attributed to anything else in the record.
+    auto depthOnly = draw;
+    depthOnly.hasPixelShader = false;
+    CHECK(drawstream::ValidateDraw(depthOnly, limits) ==
+        drawstream::DrawStreamError::DepthOnlyPass);
+
+    // Counted under its own reason rather than folded into a total, so a
+    // frame that lost its geometry to this rule says so.
+    drawstream::DrawStreamFrame frame{};
+    frame.draws.push_back(draw);
+    frame.draws.push_back(depthOnly);
+    scene::ScenePacket packet{};
+    drawstream::TranslationResult result{};
+    REQUIRE(drawstream::TranslateDrawStream(frame, limits, packet, result) ==
+        drawstream::DrawStreamError::None);
+    CHECK(result.objects == 1);
+    CHECK(result.rejectedDraws == 1);
+    CHECK(result.rejectedByReason[static_cast<std::size_t>(
+        drawstream::DrawStreamError::DepthOnlyPass)] == 1);
+}

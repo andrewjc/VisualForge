@@ -70,6 +70,14 @@ struct DrawRecordV1
     // `false` when no rasterizer state was ever bound on the drawing thread,
     // which is D3D11's documented default state rather than a guess.
     bool frontCounterClockwise{};
+    // Whether a pixel shader was bound when this draw ran. False means a
+    // depth-only pass, which carries no colour and is not world geometry the
+    // mirror should reproduce.
+    //
+    // Defaults true for the same reason `hasTransform` does: a producer that
+    // does not set it gets the permissive answer, so forgetting the field
+    // costs a duplicate rather than silently emptying the scene.
+    bool hasPixelShader{true};
     // D3D11_CULL_MODE: 1 NONE, 2 FRONT, 3 BACK. Zero means no state was seen;
     // the reader treats that as the D3D default of BACK. Carried raw so the
     // core does not depend on a D3D header.
@@ -106,10 +114,19 @@ enum class DrawStreamError : std::uint8_t
     // mirrored placement cannot be represented; refused here, where it can
     // be counted, rather than at encode time where it costs the whole frame.
     MirroredTransform,
+    // No pixel shader was bound, so this is a depth-only pass -- the depth
+    // prepass or a shadow cascade. Measured live at 22,320 of 42,590 draws.
+    //
+    // These are not colour draws and must not become scene objects. Shadow
+    // cascades often draw a different LOD mesh, which takes its own mesh
+    // identity, is textured by nothing, and renders as a white duplicate
+    // standing in the same place as the real one. The mirror derives its own
+    // depth and its own shadows, so it needs none of them.
+    DepthOnlyPass,
 };
 
 inline constexpr std::size_t kDrawStreamErrorCount =
-    static_cast<std::size_t>(DrawStreamError::MirroredTransform) + 1;
+    static_cast<std::size_t>(DrawStreamError::DepthOnlyPass) + 1;
 
 // A frame's worth of draws, plus what did not fit. The arena that fills this
 // is bounded because it is written on the render thread; a dropped count that
