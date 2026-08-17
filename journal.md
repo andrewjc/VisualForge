@@ -3727,3 +3727,37 @@ remaining cost and not a measurement artefact.
 The frame went from about 900 ms to about 44 ms. The scene did not shrink to
 buy it: 940 draws, 1.15 M vertices, 862 of 940 materials textured, against a
 baseline of 923 objects and 1.12 M vertices.
+
+### Two measured reverts
+
+Both were reverted on evidence rather than suspicion, and both are worth
+keeping in the record because the reasoning looked sound in each case.
+
+- Caching the derived scene packet never hit once. The recorded draw stream
+  varies between frames -- 6,268 one frame, 5,941 the next -- while the mesh
+  set it produces does not, so a key over the draws could not match. The
+  signature was pure added cost.
+- Patching only the material section of the encoded packet instead of
+  re-encoding it looked like the obvious fix for the encode spikes, and it has
+  a passing test proving a patched packet is byte-identical to a re-encoded
+  one. In the live run it made encode fourteen times *worse*: 3,341 us became
+  45,900. The revert restored 3,394, which is what identifies the change as the
+  cause rather than the machine. Why it is slower is not explained, and saying
+  so is better than keeping a change that measures worse.
+
+### The steady state is not steady over minutes
+
+Within one settled run, the early windows meet the gate and the late ones do
+not:
+
+```
+00:58:19  geometry-us=4983   encode-us=3394   render-us=39631  present-us=0
+00:58:36  geometry-us=19010  encode-us=17443  render-us=58739  present-us=382
+```
+
+The mesh set is unchanged across all of them. What moves in step is
+`present-us`, from zero to several hundred microseconds, with render and encode
+rising alongside it. That points at the present path -- the submit, the fence
+and the readback -- accumulating back-pressure, which is step 4 of the goal and
+was never started. It is not the geometry, the library or the encode: those are
+each doing the same work in the first window and the last.
