@@ -782,6 +782,52 @@ bool BuildLiveSceneGeometry(
         meshes.push_back(mesh);
     }
 
+    // How much of the scene actually differs from the previous frame.
+    //
+    // The assembly rebuilds every vertex and index each frame at a cost of
+    // 454 ms, on the assumption that it has to. This measures whether that is
+    // true: a mesh is unchanged when it keeps its identity *and* still points
+    // at the same bytes, because an identity alone would call a re-extracted
+    // mesh unchanged and a cache keyed on it would render stale geometry.
+    {
+        struct Fingerprint
+        {
+            const void* vertices{};
+            std::size_t vertexBytes{};
+            std::size_t indexCount{};
+        };
+        static std::unordered_map<std::uint64_t, Fingerprint> previous;
+        std::unordered_map<std::uint64_t, Fingerprint> current;
+        current.reserve(meshes.size());
+        std::uint32_t unchanged = 0;
+        std::uint32_t changed = 0;
+        std::uint32_t added = 0;
+        for (const auto& mesh : meshes) {
+            const Fingerprint print{mesh.vertices.data(),
+                mesh.vertices.size_bytes(), mesh.indices.size()};
+            current.emplace(mesh.identity, print);
+            const auto found = previous.find(mesh.identity);
+            if (found == previous.end()) {
+                ++added;
+            } else if (found->second.vertices == print.vertices &&
+                found->second.vertexBytes == print.vertexBytes &&
+                found->second.indexCount == print.indexCount) {
+                ++unchanged;
+            } else {
+                ++changed;
+            }
+        }
+        const auto removed = previous.size() > current.size()
+            ? static_cast<std::uint32_t>(previous.size() - current.size())
+            : 0u;
+        if (frameId % 120 == 0) {
+            log::Write("renderer-mesh-churn: meshes=%zu unchanged=%u "
+                "changed=%u added=%u removed=%u",
+                meshes.size(), unchanged, changed, added, removed);
+        }
+        previous = std::move(current);
+    }
+
     if (frameId % 120 == 0) {
         const auto layouts = engine_draw_capture::LayoutCounters();
         log::Write("renderer-meshes: objects=%zu usable=%zu not-extracted=%u "
