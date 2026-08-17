@@ -5,6 +5,7 @@
 #include "EngineDrawCapture.h"
 #include "renderer_core/EngineEnvironmentSource.h"
 #include "EngineTextureResidency.h"
+#include "EngineWorldSuppression.h"
 #include "EngineMeshExtractor.h"
 #include "Log.h"
 #include "renderer_api/BackendAbi.h"
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <cstddef>
@@ -374,6 +376,10 @@ std::vector<std::byte> s_mirrorTextureLibrary;
 // images is attributable to per-material textures and nothing else. Held
 // rather than discarded so the comparison runs on identical geometry, lights
 // and camera -- a later frame would differ for reasons of its own.
+std::uint64_t s_mirrorMicrosecondsTotal = 0;
+std::uint64_t s_mirrorMicrosecondsWorst = 0;
+std::uint64_t s_mirrorTimedFrames = 0;
+
 std::vector<raster::Rgba8> s_mirrorLibraryProbePixels;
 bool s_mirrorLibraryProbeDone{};
 std::uint32_t s_mirrorLibraryProbeAttempts{};
@@ -1456,7 +1462,7 @@ void DumpMirrorFrame(
 
 }
 
-bool CompositeMirror(
+bool CompositeMirrorImpl(
     IDXGISwapChain* swapchain,
     const unsigned long long imageBase) noexcept
 {
@@ -1874,6 +1880,52 @@ bool CompositeMirror(
         DumpMirrorFrame(world.sourceSlot, width, height);
     }
     return true;
+}
+
+// The frame boundary for phase 25, and the only place the draw hooks' state is
+// written.
+//
+// Present is exactly the right moment: the draws of the frame that follows all
+// arrive after it, so publishing here decides that frame and cannot half-decide
+// the one in progress. `worldReproduced` is this frame's actual outcome --
+// whether an image reached the swapchain -- which is the honest predictor for
+// the next one and degrades safely, because the first frame the mirror fails
+// is the frame after which suppression stops.
+bool CompositeMirror(
+    IDXGISwapChain* swapchain,
+    const unsigned long long imageBase) noexcept
+{
+    const auto started = std::chrono::steady_clock::now();
+    const auto presented = CompositeMirrorImpl(swapchain, imageBase);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count();
+
+    world_suppression::Publish(world_suppression::Enabled(), presented);
+
+    if (world_suppression::Enabled()) {
+        s_mirrorMicrosecondsTotal += static_cast<std::uint64_t>(elapsed);
+        ++s_mirrorTimedFrames;
+        if (static_cast<std::uint64_t>(elapsed) > s_mirrorMicrosecondsWorst) {
+            s_mirrorMicrosecondsWorst = static_cast<std::uint64_t>(elapsed);
+        }
+        // Reported as a running mean and a worst case rather than per frame: a
+        // line per frame is unreadable at sixty of them a second, and a mean
+        // alone hides the stall that the library rebuild puts in one frame.
+        if (s_mirrorTimedFrames % 120 == 0) {
+            const auto counters = world_suppression::Snapshot();
+            log::Write("renderer-suppression: frames=%llu mirror-mean-us=%llu "
+                "mirror-worst-us=%llu suppressed=%llu forwarded=%llu "
+                "presented=%s",
+                static_cast<unsigned long long>(s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_mirrorMicrosecondsTotal / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(s_mirrorMicrosecondsWorst),
+                static_cast<unsigned long long>(counters.suppressed),
+                static_cast<unsigned long long>(counters.forwarded),
+                presented ? "yes" : "no");
+        }
+    }
+    return presented;
 }
 
 void BeforeResize() noexcept

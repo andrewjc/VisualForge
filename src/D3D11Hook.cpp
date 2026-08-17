@@ -14,6 +14,7 @@
 #include "EngineTextureCapture.h"
 #include "Log.h"
 #include "DepthCapture.h"
+#include "EngineWorldSuppression.h"
 #include "Lut.h"
 #include "Overlay.h"
 #include "PostProcess.h"
@@ -165,6 +166,10 @@ bool InitializeForSwapchain(IDXGISwapChain* swap)
 
     s_backbufferWidth = desc.BufferDesc.Width;
     s_backbufferHeight = desc.BufferDesc.Height;
+
+    // Before the depth hooks, because the classification those hooks publish is
+    // only meaningful once the mode it feeds has been decided and logged.
+    world_suppression::Initialize();
 
     depth::SetTargetSize(desc.BufferDesc.Width, desc.BufferDesc.Height);
     depth::Install(s_device, s_context);

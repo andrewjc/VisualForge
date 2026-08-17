@@ -711,6 +711,7 @@ add_library(VisualForge SHARED
     src/EngineSettings.cpp
     src/IniWriter.cpp
     src/DepthCapture.cpp
+    src/EngineWorldSuppression.cpp
     src/IntroSkip.cpp
     src/Lut.cpp
     src/PostProcess.cpp

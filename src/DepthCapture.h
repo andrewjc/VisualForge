@@ -40,6 +40,18 @@ ID3D11ShaderResourceView* Acquire(ID3D11Device* device, ID3D11DeviceContext* ctx
 // Drops size-dependent resources (call from the ResizeBuffers hook).
 void OnResize();
 
+// Whether the depth-stencil view currently bound on the calling thread is the
+// main scene depth. This is the world-target classification the phase 25 draw
+// path needs: the engine draws the world with the scene depth bound and the
+// interface without it, so it separates the draws Vulkan reproduces from the
+// draws it does not.
+//
+// Thread-local because the engine renders on several threads through deferred
+// contexts, and the binding that matters to a draw is the one its own thread
+// made. Answers false until the scene depth has been identified, which keeps
+// an unclassified frame on the vanilla path.
+bool SceneDepthBound();
+
 bool Installed();
 bool HaveDepth();
 // Format of the captured depth texture, for diagnostics (DXGI_FORMAT_UNKNOWN if none).

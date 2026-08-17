@@ -6,6 +6,7 @@
 
 #include <MinHook.h>
 
+#include <cstdint>
 #include <mutex>
 
 namespace vf::depth {
@@ -112,6 +113,66 @@ DXGI_FORMAT TypelessEquivalent(DXGI_FORMAT texFormat)
     }
 }
 
+// The scene depth's COM identity. Only IUnknown is guaranteed identical across
+// an object's interfaces, so a resource recovered from a view cannot be
+// compared to a texture pointer directly -- the two need not share an address.
+// This project has already paid for that lesson once, in the texture path.
+//
+// Not an owning reference: s_sceneDepth holds the object alive, and an object's
+// IUnknown address is stable for its lifetime.
+IUnknown* s_sceneDepthIdentity = nullptr;
+// Bumped whenever the identity changes. A thread cannot reset another thread's
+// cache, so the caches carry the generation they were computed under and
+// recompute when it moves. Without it, a resize that hands the allocator's
+// same view address back would keep a stale classification alive per thread.
+std::uint64_t s_sceneDepthGeneration = 0;
+
+// Cached per thread and keyed on the view, so a repeated bind of the same
+// target costs a pointer compare rather than a QueryInterface. Draws outnumber
+// binds by a wide margin and this sits in front of every one of them.
+thread_local ID3D11DepthStencilView* t_classifiedDSV = nullptr;
+thread_local std::uint64_t t_classifiedGeneration = 0;
+thread_local bool t_sceneDepthBound = false;
+
+IUnknown* CanonicalIdentity(IUnknown* value)
+{
+    if (!value) return nullptr;
+    IUnknown* identity = nullptr;
+    if (FAILED(value->QueryInterface(__uuidof(IUnknown),
+            reinterpret_cast<void**>(&identity)))) {
+        return nullptr;
+    }
+    // Released immediately: the caller keeps the object alive by other means
+    // and only the address is wanted.
+    identity->Release();
+    return identity;
+}
+
+// Classifies the bind for the calling thread. Separate from NoteDepthTarget
+// because that one filters repeated binds through a shared pointer and would
+// skip exactly the calls this needs to see.
+void ClassifyBoundDepth(ID3D11DepthStencilView* dsv)
+{
+    IUnknown* expected = nullptr;
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        expected = s_sceneDepthIdentity;
+        generation = s_sceneDepthGeneration;
+    }
+    if (dsv == t_classifiedDSV && generation == t_classifiedGeneration) return;
+    t_classifiedDSV = dsv;
+    t_classifiedGeneration = generation;
+    t_sceneDepthBound = false;
+    if (!dsv || !expected) return;
+
+    ID3D11Resource* res = nullptr;
+    dsv->GetResource(&res);
+    if (!res) return;
+    t_sceneDepthBound = CanonicalIdentity(res) == expected;
+    res->Release();
+}
+
 // Called from the render thread on every depth-target bind. Must stay cheap.
 void NoteDepthTarget(ID3D11DepthStencilView* dsv)
 {
@@ -146,6 +207,8 @@ void NoteDepthTarget(ID3D11DepthStencilView* dsv)
     if (s_sceneDepth != tex) {
         SafeRelease(s_sceneDepth);
         s_sceneDepth = tex; // keep the reference from QueryInterface
+        s_sceneDepthIdentity = CanonicalIdentity(tex);
+        ++s_sceneDepthGeneration;
         if (!s_loggedFound) {
             s_loggedFound = true;
             log::Write("depth: scene depth acquired (%ux%u, format=%d)", desc.Width, desc.Height,
@@ -161,6 +224,7 @@ void WINAPI HookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT numViews,
                                      ID3D11DepthStencilView* dsv)
 {
     NoteDepthTarget(dsv);
+    ClassifyBoundDepth(dsv);
     s_origOMSetRT(self, numViews, rtvs, dsv);
 }
 
@@ -170,6 +234,7 @@ void WINAPI HookedOMSetRTAndUAV(ID3D11DeviceContext* self, UINT numRTVs,
                                 ID3D11UnorderedAccessView* const* uavs, const UINT* counts)
 {
     NoteDepthTarget(dsv);
+    ClassifyBoundDepth(dsv);
     s_origOMSetRTUAV(self, numRTVs, rtvs, dsv, uavStart, numUAVs, uavs, counts);
 }
 
@@ -463,6 +528,11 @@ void OnResize()
     SafeRelease(s_copy);
     SafeRelease(s_staging);
     SafeRelease(s_sceneDepth);
+    // Cleared with the texture it names. A stale identity would classify the
+    // next frame's world draws against an object that no longer exists, and on
+    // a resize the allocator is free to hand the same address back.
+    s_sceneDepthIdentity = nullptr;
+    ++s_sceneDepthGeneration;
     s_lastDSV = nullptr;
     s_copyW = s_copyH = 0;
     s_copyFormat = DXGI_FORMAT_UNKNOWN;
@@ -473,6 +543,11 @@ void OnResize()
 void Shutdown()
 {
     OnResize();
+}
+
+bool SceneDepthBound()
+{
+    return t_sceneDepthBound;
 }
 
 bool Installed()

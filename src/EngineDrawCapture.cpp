@@ -1,6 +1,9 @@
 #include "EngineDrawCapture.h"
 
 #include "Log.h"
+#include "DepthCapture.h"
+#include "EngineWorldSuppression.h"
+#include "renderer_core/EngineSuppression.h"
 #include "renderer_core/EngineVertex.h"
 #include "renderer_core/ShaderReflection.h"
 
@@ -865,6 +868,29 @@ void NoteDraw(const UINT indexCount, const bool instanced) noexcept
         t_currentVertexStride, true);
 }
 
+// Whether this draw is Vulkan's rather than vanilla's.
+//
+// Called for every draw, so it does no work beyond three relaxed loads and the
+// depth classification's thread-local read. Recording happens first and
+// unconditionally: the mirror is built out of these draws, so a suppressed
+// frame has to observe exactly what an unsuppressed one does or suppression
+// would starve the renderer that replaces it.
+bool SuppressThisDraw() noexcept
+{
+    if (!world_suppression::Enabled()) return false;
+    renderer::suppression::DrawContext context{};
+    context.permitGrants = world_suppression::PermitGrants();
+    context.writesWorldTarget = depth::SceneDepthBound();
+    context.worldReproduced = world_suppression::WorldReproduced();
+    const auto disposition = renderer::suppression::ClassifyDraw(context);
+    if (disposition == renderer::suppression::DrawDisposition::Suppressed) {
+        world_suppression::NoteSuppressed();
+        return true;
+    }
+    world_suppression::NoteForwarded();
+    return false;
+}
+
 void __stdcall HookedDrawIndexed(
     void* self,
     const UINT indexCount,
@@ -873,6 +899,7 @@ void __stdcall HookedDrawIndexed(
 {
     NoteDraw(indexCount, false);
     RecordDraw(indexCount, startIndex, baseVertex, 1);
+    if (SuppressThisDraw()) return;
     s_origDrawIndexed(self, indexCount, startIndex, baseVertex);
 }
 
@@ -886,6 +913,7 @@ void __stdcall HookedDrawIndexedInstanced(
 {
     NoteDraw(indexCountPerInstance, true);
     RecordDraw(indexCountPerInstance, startIndex, baseVertex, instanceCount);
+    if (SuppressThisDraw()) return;
     s_origDrawIndexedInstanced(self, indexCountPerInstance, instanceCount,
         startIndex, baseVertex, startInstance);
 }

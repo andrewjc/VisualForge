@@ -66,7 +66,12 @@ param(
     # camera and presents it through the bridge. Unlike the bridge pattern,
     # what reaches the screen is produced by the replacement renderer rather
     # than a fixed test image.
-    [switch]$EnableMirror
+    [switch]$EnableMirror,
+    # Drops the engine's world draws once the mirror is presenting, so the run
+    # measures this renderer instead of both at once. The world is incomplete
+    # by exactly whatever the mirror does not yet reproduce -- that is the
+    # trade the measurement makes, and the reason this is not the default.
+    [switch]$SuppressWorldDraws
 )
 
 $ErrorActionPreference = 'Stop'
@@ -560,6 +565,9 @@ try {
     $env:VISUALFORGE_CAPTURE_TEXTURE_PATH = (Join-Path $captureDirectory 'startup-texture.vftex')
     $env:VISUALFORGE_TRACE_ONCE = '1'
     $env:VISUALFORGE_TRACE_PATH = (Join-Path $captureDirectory 'startup-frame.vftrace')
+    if ($SuppressWorldDraws) {
+        $env:VISUALFORGE_SUPPRESS_WORLD = '1'
+    }
     if ($EnableBackend) {
         $env:VISUALFORGE_BACKEND_PROBE = '1'
         $env:VISUALFORGE_VULKAN_VALIDATION = '1'
@@ -855,7 +863,8 @@ try {
             'VISUALFORGE_CAPTURE_TEXTURE_PATH', 'VISUALFORGE_TRACE_ONCE', 'VISUALFORGE_TRACE_PATH',
             'VISUALFORGE_BACKEND_PROBE', 'VISUALFORGE_VULKAN_VALIDATION',
             'VISUALFORGE_BRIDGE_PATTERN', 'VISUALFORGE_MIRROR',
-            'VISUALFORGE_MIRROR_DUMP', 'VISUALFORGE_DRAW_CAPTURE')) {
+            'VISUALFORGE_MIRROR_DUMP', 'VISUALFORGE_DRAW_CAPTURE',
+            'VISUALFORGE_SUPPRESS_WORLD')) {
         Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
     }
     if (Test-Path -LiteralPath $visualForgeLog -PathType Leaf) {
