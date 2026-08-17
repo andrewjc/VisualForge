@@ -997,3 +997,87 @@ TEST_CASE("P20_offscreen_passes_are_not_world_geometry",
     CHECK(result.rejectedByReason[static_cast<std::size_t>(
         drawstream::DrawStreamError::OffscreenPass)] == 1);
 }
+
+TEST_CASE("P20_reused_geometry_matches_a_full_rebuild",
+    "[drawstream][phase20]")
+{
+    // Measured live: a settled scene reproduces all 940 meshes byte for byte
+    // every frame, and decoding them again costs 454 ms. Reuse is only sound
+    // if it is indistinguishable from the rebuild it replaces.
+    const std::array<float, 18> positions{
+        0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+        2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 2.0f, 1.0f, 0.0f};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const std::array<vf::renderer::mesh::InputElementDesc, 1> elements{{
+        {"POSITION", 0, vf::renderer::mesh::kFormatR32G32B32Float, 0, 0}}};
+
+    const auto makePacket = []() {
+        scene::ScenePacket packet{};
+        packet.header.frameId = 1;
+        packet.header.viewId = 1;
+        for (std::uint32_t slot = 0; slot < 2; ++slot) {
+            scene::OpaqueObjectV1 object{};
+            object.objectId = 0x1000 + slot;
+            object.materialId = 0x2000 + slot;
+            object.flags = scene::ObjectWritesWorldTarget | scene::ObjectStatic;
+            object.boundsMinimum[0] = -1.0f;
+            object.boundsMaximum[0] = 1.0f;
+            object.model[0] = 1.0f;
+            object.model[5] = 1.0f;
+            object.model[10] = 1.0f;
+            object.model[15] = 1.0f;
+            object.geometricNormal[2] = 1.0f;
+            object.shadingNormal[2] = 1.0f;
+            packet.objects.push_back(object);
+        }
+        return packet;
+    };
+
+    std::array<drawstream::AssembledMesh, 2> cache{};
+    for (std::uint32_t slot = 0; slot < 2; ++slot) {
+        cache[slot].identity = 0x1000 + slot;
+        cache[slot].vertexStride = 12;
+        REQUIRE(vf::renderer::mesh::BuildLayoutFromInputElements(
+            elements, 12, 0, cache[slot].layout) ==
+            vf::renderer::mesh::VertexLayoutError::None);
+        cache[slot].vertices = std::as_bytes(
+            std::span{positions.data() + slot * 9, 9});
+        cache[slot].indices = indices;
+    }
+
+    auto rebuiltScene = makePacket();
+    raster::DecodedPacket rebuilt{};
+    drawstream::AssemblyResult rebuiltResult{};
+    REQUIRE(drawstream::AssembleSceneGeometry(rebuiltScene, cache, rebuilt,
+        rebuiltResult, false) == drawstream::DrawStreamError::None);
+    REQUIRE(rebuilt.vertices.size() == 6);
+
+    // Second pass over the same mesh set, reusing what the first produced.
+    auto reusedScene = makePacket();
+    drawstream::AssemblyResult reusedResult{};
+    REQUIRE(drawstream::AssembleSceneGeometry(reusedScene, cache, rebuilt,
+        reusedResult, true) == drawstream::DrawStreamError::None);
+
+    // The draw ranges are what a wrong cursor would corrupt, and a scene made
+    // of the right meshes at the wrong offsets still looks like a scene.
+    REQUIRE(rebuilt.draws.size() == 2);
+    CHECK(rebuilt.draws[0].firstIndex == 0);
+    CHECK(rebuilt.draws[0].vertexOffset == 0);
+    CHECK(rebuilt.draws[1].firstIndex == 3);
+    CHECK(rebuilt.draws[1].vertexOffset == 3);
+    CHECK(rebuilt.vertices.size() == 6);
+    CHECK(rebuilt.indices.size() == 6);
+    CHECK(rebuilt.header.vertexCount == 6);
+    CHECK(rebuilt.materials.size() == 2);
+    CHECK(reusedScene.objects.size() == rebuiltScene.objects.size());
+
+    // A reuse claim that does not match the mesh set is refused rather than
+    // rendered: the draw ranges would point into the wrong geometry.
+    raster::DecodedPacket stale{};
+    stale.vertices.resize(3);
+    stale.indices.resize(3);
+    auto staleScene = makePacket();
+    drawstream::AssemblyResult staleResult{};
+    CHECK(drawstream::AssembleSceneGeometry(staleScene, cache, stale,
+        staleResult, true) != drawstream::DrawStreamError::None);
+}

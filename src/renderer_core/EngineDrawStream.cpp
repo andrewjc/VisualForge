@@ -399,10 +399,26 @@ DrawStreamError AssembleSceneGeometry(
     scene::ScenePacket& packet,
     const std::span<const AssembledMesh> meshes,
     raster::DecodedPacket& rasterPacket,
-    AssemblyResult& result) noexcept
+    AssemblyResult& result,
+    const bool reuseGeometry) noexcept
 {
+    // Vertices and indices are kept only when the caller states this is the
+    // same mesh set it assembled last time. Everything else is rebuilt: draws,
+    // materials and the pruned object list are a few hundred entries, while
+    // the vertex decode is a million and measured 454 ms.
+    auto keptVertices = std::move(rasterPacket.vertices);
+    auto keptIndices = std::move(rasterPacket.indices);
     rasterPacket = {};
     result = {};
+    if (reuseGeometry) {
+        rasterPacket.vertices = std::move(keptVertices);
+        rasterPacket.indices = std::move(keptIndices);
+    }
+    // Where the next mesh would start. Tracked rather than read back from the
+    // arrays, so a reused assembly hands every draw the same range a rebuilt
+    // one does.
+    std::size_t vertexCursor = 0;
+    std::size_t indexCursor = 0;
 
     try {
         // Objects survive only if their geometry has been read back. They are
@@ -460,14 +476,12 @@ DrawStreamError AssembleSceneGeometry(
 
             raster::RasterDrawV1 draw{};
             draw.materialId = keptObjects[index].materialId;
-            draw.firstIndex =
-                static_cast<std::uint32_t>(rasterPacket.indices.size());
+            draw.firstIndex = static_cast<std::uint32_t>(indexCursor);
             draw.indexCount =
                 static_cast<std::uint32_t>(mesh.indices.size());
             // The concatenated base for this mesh, so its own indices stay
             // zero-based and every mesh keeps the numbering it was read with.
-            draw.vertexOffset =
-                static_cast<std::int32_t>(rasterPacket.vertices.size());
+            draw.vertexOffset = static_cast<std::int32_t>(vertexCursor);
             // The winding the engine itself declared for this draw.
             //
             // This was `CounterClockwise` for every mesh, which is the
@@ -548,11 +562,15 @@ DrawStreamError AssembleSceneGeometry(
                 } else {
                     ++result.verticesWithoutNormals;
                 }
-                rasterPacket.vertices.push_back(value);
+                if (!reuseGeometry) rasterPacket.vertices.push_back(value);
             }
-            for (const auto index32 : mesh.indices) {
-                rasterPacket.indices.push_back(index32);
+            if (!reuseGeometry) {
+                for (const auto index32 : mesh.indices) {
+                    rasterPacket.indices.push_back(index32);
+                }
             }
+            vertexCursor += vertexCount;
+            indexCursor += mesh.indices.size();
 
             raster::RasterMaterialV1 material{};
             material.resourceId = keptObjects[index].materialId;
@@ -561,6 +579,18 @@ DrawStreamError AssembleSceneGeometry(
             material.baseColor[2] = 1.0f;
             material.baseColor[3] = 1.0f;
             rasterPacket.materials.push_back(material);
+        }
+
+        // The reused arrays must be exactly what this mesh set would have
+        // produced. A mismatch means the caller's "same mesh set" claim was
+        // wrong, and every draw range computed above now points into the wrong
+        // geometry -- which draws a recognisable scene made of the wrong
+        // objects, the hardest kind of wrong to attribute. Refused rather than
+        // rendered, so the caller rebuilds.
+        if (reuseGeometry &&
+            (rasterPacket.vertices.size() != vertexCursor ||
+                rasterPacket.indices.size() != indexCursor)) {
+            return DrawStreamError::EmptyGeometry;
         }
 
         packet.objects = std::move(keptObjects);

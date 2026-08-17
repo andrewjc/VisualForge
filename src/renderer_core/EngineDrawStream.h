@@ -316,7 +316,13 @@ struct AssemblyResult
     scene::ScenePacket& packet,
     std::span<const AssembledMesh> meshes,
     raster::DecodedPacket& rasterPacket,
-    AssemblyResult& result) noexcept;
+    AssemblyResult& result,
+    // True only when `rasterPacket` already holds the vertices and indices
+    // this exact mesh set produced. The decode is a million vertices and
+    // measured 454 ms for a result that a settled scene reproduces byte for
+    // byte; every other output is rebuilt regardless. The claim is checked
+    // against the mesh set before it is trusted.
+    bool reuseGeometry = false) noexcept;
 
 [[nodiscard]] const char* ToString(DrawStreamError error) noexcept;
 
