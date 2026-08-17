@@ -2,13 +2,11 @@
 #include "Config.h"
 #include "DepthCapture.h"
 #include "EngineSettings.h"
-#include "FlexShim.h"
 #include "IniWriter.h"
 #include "Log.h"
 #include "Lut.h"
 #include "PostProcess.h"
 #include "SettingsCatalog.h"
-#include "WeaponDebris.h"
 
 #include <imgui.h>
 
@@ -537,108 +535,6 @@ void DrawPostFxTab(ID3D11Device* device)
 
 void DrawSystemsTab()
 {
-    ImGui::TextUnformatted("Weapon Debris (NVIDIA Flex)");
-    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
-                       "Do not enable: confirmed to crash this installation.");
-    ImGui::TextWrapped(
-        "A debugger caught the fault: a null-pointer write inside "
-        "flexRelease_x64!flexCreateTriangleMesh, reached while the game registers new "
-        "collision geometry — so it dies within seconds of walking into fresh terrain.\n\n"
-        "The crash fix below guards a DIFFERENT failure: a null shader-resource view from "
-        "CreateShaderResourceView. That guard is real and still worth having, but it does "
-        "not protect the physics library, and nothing in this plugin can — the fault is "
-        "inside NVIDIA's closed-source solver.");
-    ImGui::Spacing();
-
-    // Crash-fix status.
-    if (debris::Installed()) {
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Crash fix: ACTIVE");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%d failed views intercepted this session)", debris::InterceptedFailures());
-    } else {
-        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Crash fix: not installed");
-    }
-
-    bool& fix = config::Get().weaponDebrisCrashFix;
-    if (ImGui::Checkbox("Enable crash fix (applies next launch)", &fix)) {
-        config::Save();
-        s_status = "Crash fix will be " + std::string(fix ? "enabled" : "disabled") + " next launch";
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-
-    // Enabling debris is offered only as a deliberate, unlocked action. It is known to crash
-    // this installation, so a single stray click must not be able to break the game.
-    Entry* flex = settings::Find("bNVFlexEnable:NVFlex");
-    if (flex) {
-        const bool on = settings::GetBool(*flex);
-        ImGui::Text("bNVFlexEnable is currently %s", on ? "ON" : "off");
-
-        static bool unlocked = false;
-        ImGui::Checkbox("I accept this crashes — let me enable it anyway", &unlocked);
-        ImGui::BeginDisabled(!unlocked);
-        if (ImGui::Button(on ? "Disable weapon debris" : "Enable weapon debris")) {
-            settings::SetBool(*flex, !on);
-            std::vector<settings::Entry*> one{flex};
-            std::string err;
-            int n = ini::WriteChanged(one, err);
-            s_status = n >= 0
-                ? std::string("bNVFlexEnable set to ") + (!on ? "1" : "0") + " — restart to apply"
-                : "Error: " + err;
-        }
-        ImGui::EndDisabled();
-    } else {
-        ImGui::TextDisabled("bNVFlexEnable:NVFlex not resolved");
-    }
-
-    ImGui::Spacing();
-    ImGui::SeparatorText("Weapon debris physics (our solver)");
-    if (flexshim::Installed()) {
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Flex intercepted");
-        ImGui::SameLine();
-        ImGui::TextDisabled("%d pieces live, largest radius %.1f", flexshim::ActivePieces(),
-                            flexshim::LargestPieceRadius());
-    } else {
-        ImGui::TextDisabled("Flex interception not installed");
-    }
-    ImGui::TextWrapped("These apply immediately — the physics is ours, so there is nothing "
-                       "to restart. Shoot something while you drag them.");
-
-    auto& t = flexshim::g_tune;
-    auto& cfg = config::Get();
-    bool dirty = false;
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Gravity", &cfg.debrisGravityScale, 0.1f, 3.0f, "%.2fx");
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Air drag", &cfg.debrisDragScale, 0.0f, 4.0f, "%.2fx");
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Bounciness", &cfg.debrisRestitutionScale, 0.0f, 3.0f, "%.2fx");
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Grip", &cfg.debrisFrictionScale, 0.0f, 2.0f, "%.2fx");
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Spawn spin", &cfg.debrisSpawnSpin, 0.0f, 40.0f, "%.0f rad/s");
-    ImGui::SetNextItemWidth(240);
-    dirty |= ImGui::SliderFloat("Impact spin", &cfg.debrisImpactTorque, 0.0f, 3.0f, "%.2fx");
-    dirty |= ImGui::Checkbox("Rolling (round pieces roll down slopes)", &cfg.debrisRolling);
-
-    if (ImGui::Button("Reset debris physics")) {
-        cfg.debrisGravityScale = 1.0f;
-        cfg.debrisDragScale = 1.0f;
-        cfg.debrisRestitutionScale = 1.0f;
-        cfg.debrisFrictionScale = 1.0f;
-        cfg.debrisSpawnSpin = 12.0f;
-        cfg.debrisImpactTorque = 1.0f;
-        cfg.debrisRolling = true;
-        dirty = true;
-    }
-    if (dirty) {
-        config::ApplyToPost(); // also pushes the debris tunables
-        config::Save();
-    }
-    (void)t;
-
-    ImGui::Spacing();
     ImGui::SeparatorText("Scene depth capture (foundation for screen-space GI)");
     if (!depth::Installed()) {
         ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Depth tracking: not installed");
@@ -911,10 +807,9 @@ void DrawBasicView(ID3D11Device* device)
     ImGui::SeparatorText("Extras");
     if (ImGui::Checkbox("Skip intro movies", &cfg.skipIntroMovies))
         config::Save();
-    // Weapon debris is deliberately NOT offered here. NVIDIA Flex crashes with a null-pointer
-    // write inside flexCreateTriangleMesh on modern GPUs, which is a physics-library fault
-    // the CreateShaderResourceView guard does not and cannot cover. See the Systems tab.
-    ImGui::TextDisabled("Weapon debris: unavailable (NVIDIA Flex is unstable — see Systems)");
+    // Weapon debris is not offered here, and this plugin no longer touches NVIDIA Flex at
+    // all: FlexRevive replaces the solver rather than guarding against its crash, and two
+    // plugins redirecting the same Flex import tables would fight over them.
     if (Entry* g = settings::Find("bVolumetricLightingEnable:Display")) {
         bool on = settings::GetBool(*g);
         if (ImGui::Checkbox("Godrays (volumetric lighting)", &on)) {

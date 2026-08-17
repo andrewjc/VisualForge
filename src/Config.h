@@ -9,22 +9,6 @@ struct Values {
     int toggleKey = 0x79; // VK_F10
     bool basicMode = true; // overlay opens in Basic (simplified) mode by default
     bool skipIntroMovies = true;
-    bool weaponDebrisCrashFix = true; // guard a null shader-resource view from the debris path
-    // Force weapon debris off when NVIDIA Flex cannot run (CUDA 7.5 solver on a modern GPU).
-    // Without this, bNVFlexEnable=1 crashes the game within seconds of walking.
-    bool blockWeaponDebris = true;
-    // Redirect the Flex API into the plugin instead of the broken CUDA 7.5 library.
-    bool interceptFlex = true;
-
-    // Weapon-debris solver tuning. Because the physics is ours these apply live.
-    float debrisGravityScale = 1.0f;
-    float debrisDragScale = 1.0f;
-    float debrisRestitutionScale = 1.0f;
-    float debrisFrictionScale = 1.0f;
-    float debrisSpawnSpin = 12.0f;
-    float debrisImpactTorque = 1.0f;
-    bool debrisRolling = true;
-
     // Post processing (final-frame pass).
     bool sharpenEnabled = false;
     float sharpness = 0.4f; // 0..1

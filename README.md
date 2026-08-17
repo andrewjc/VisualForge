@@ -11,10 +11,10 @@ renderer built to run alongside the engine's own D3D11 one.
 
 Two things live in this repository. The **plugin** is finished and usable: an
 overlay that binds every INI-backed engine setting by name with no hardcoded
-addresses, a colour-grading and sharpening pass, a crash reporter, and a
-weapon-debris crash fix. The **Vulkan renderer** is in progress — it mirrors the
-live scene into a second, independently rendered frame so its output can be
-compared against the engine's, phase by phase, against a CPU reference.
+addresses, a colour-grading and sharpening pass, and a crash reporter. The
+**Vulkan renderer** is in progress — it mirrors the live scene into a second,
+independently rendered frame so its output can be compared against the
+engine's, phase by phase, against a CPU reference.
 
 Toggle the overlay with **F10**.
 
@@ -53,9 +53,6 @@ will not configure.
   tonemap, and a `.cube` 3D LUT loader — plus AMD FidelityFX Contrast Adaptive
   Sharpening, applied to the final frame in one pass. Drop `.cube` files in
   `Data\F4SE\Plugins\LUTs\`; four ship as examples.
-- **Weapon-debris crash fix.** Guards the `CreateShaderResourceView` failure
-  that crashes NVIDIA Flex debris on 10-series and later GPUs, with a control
-  to re-enable `bNVFlexEnable`.
 - **Panini projection** for ultrawide edge correction: a screen-space remap of
   the finished frame, plus the wider render FOV that gives the warp real pixels
   at the screen edge. A projection matrix cannot express Panini, because it is
@@ -75,6 +72,12 @@ will not configure.
 - **Intro-movie skip.** Blanks `sIntroSequence` and `sIntroMovie` in live memory
   before the main menu is built, leaving the animated menu background and the
   S.P.E.C.I.A.L. videos intact. `[Startup] bSkipIntroMovies`, default on.
+
+> **Weapon debris and NVIDIA Flex are not handled here.**
+> [FlexRevive](https://www.nexusmods.com/fallout4/mods/108006) replaces the
+> Flex solver rather than guarding against its crash, so this plugin no longer
+> touches it — two plugins redirecting the same Flex import tables would fight
+> over them.
 
 ## The Vulkan renderer
 
@@ -152,9 +155,6 @@ iToggleKey=121          ; virtual-key code; 121 = F10
 [Startup]
 bSkipIntroMovies=1
 
-[Systems]
-bWeaponDebrisCrashFix=1
-
 [Sharpen]
 bEnabled=0
 fSharpness=0.400
@@ -220,5 +220,5 @@ output.
 
 ## Licence
 
-No licence has been chosen yet, so default copyright applies and no permissions
-are granted. The bundled dependencies keep their own licences.
+[MIT](LICENSE). The bundled and referenced dependencies keep their own
+licences.

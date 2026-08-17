@@ -14,13 +14,11 @@
 #include "EngineTextureCapture.h"
 #include "Log.h"
 #include "DepthCapture.h"
-#include "FlexGuard.h"
 #include "Lut.h"
 #include "Overlay.h"
 #include "PostProcess.h"
 #include "RendererBackendProbe.h"
 #include "RendererObservation.h"
-#include "WeaponDebris.h"
 
 #include <string>
 
@@ -164,14 +162,6 @@ bool InitializeForSwapchain(IDXGISwapChain* swap)
     }
 
     settings::ResolveAll();
-
-    if (config::Get().weaponDebrisCrashFix)
-        debris::Install(s_device);
-
-    // Runs after the INIs are loaded but before gameplay, which is the window in which
-    // turning weapon debris off still prevents the engine from ever calling into Flex.
-    if (config::Get().blockWeaponDebris)
-        flexguard::EnforceSafety(true);
 
     s_backbufferWidth = desc.BufferDesc.Width;
     s_backbufferHeight = desc.BufferDesc.Height;

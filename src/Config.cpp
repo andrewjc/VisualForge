@@ -1,5 +1,4 @@
 #include "Config.h"
-#include "FlexShim.h"
 #include "PostProcess.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -66,16 +65,6 @@ void Load()
     s_values.toggleKey = int(GetPrivateProfileIntW(L"Overlay", L"iToggleKey", s_values.toggleKey, s_path));
     s_values.basicMode = GetPrivateProfileIntW(L"Overlay", L"bBasicMode", s_values.basicMode ? 1 : 0, s_path) != 0;
     s_values.skipIntroMovies = GetPrivateProfileIntW(L"Startup", L"bSkipIntroMovies", s_values.skipIntroMovies ? 1 : 0, s_path) != 0;
-    s_values.weaponDebrisCrashFix = GetPrivateProfileIntW(L"Systems", L"bWeaponDebrisCrashFix", s_values.weaponDebrisCrashFix ? 1 : 0, s_path) != 0;
-    s_values.blockWeaponDebris = GetPrivateProfileIntW(L"Systems", L"bBlockWeaponDebris", s_values.blockWeaponDebris ? 1 : 0, s_path) != 0;
-    s_values.interceptFlex = GetPrivateProfileIntW(L"Systems", L"bInterceptFlex", s_values.interceptFlex ? 1 : 0, s_path) != 0;
-    s_values.debrisGravityScale = ReadFloat(L"Debris", L"fGravityScale", s_values.debrisGravityScale);
-    s_values.debrisDragScale = ReadFloat(L"Debris", L"fDragScale", s_values.debrisDragScale);
-    s_values.debrisRestitutionScale = ReadFloat(L"Debris", L"fRestitutionScale", s_values.debrisRestitutionScale);
-    s_values.debrisFrictionScale = ReadFloat(L"Debris", L"fFrictionScale", s_values.debrisFrictionScale);
-    s_values.debrisSpawnSpin = ReadFloat(L"Debris", L"fSpawnSpin", s_values.debrisSpawnSpin);
-    s_values.debrisImpactTorque = ReadFloat(L"Debris", L"fImpactTorque", s_values.debrisImpactTorque);
-    s_values.debrisRolling = GetPrivateProfileIntW(L"Debris", L"bRolling", s_values.debrisRolling ? 1 : 0, s_path) != 0;
 
     s_values.sharpenEnabled = GetPrivateProfileIntW(L"Sharpen", L"bEnabled", s_values.sharpenEnabled ? 1 : 0, s_path) != 0;
     s_values.sharpness = ReadFloat(L"Sharpen", L"fSharpness", s_values.sharpness);
@@ -135,16 +124,6 @@ void Save()
     WritePrivateProfileStringW(L"Overlay", L"iToggleKey", buf, s_path);
     WriteBool(L"Overlay", L"bBasicMode", s_values.basicMode);
     WriteBool(L"Startup", L"bSkipIntroMovies", s_values.skipIntroMovies);
-    WriteBool(L"Systems", L"bWeaponDebrisCrashFix", s_values.weaponDebrisCrashFix);
-    WriteBool(L"Systems", L"bBlockWeaponDebris", s_values.blockWeaponDebris);
-    WriteBool(L"Systems", L"bInterceptFlex", s_values.interceptFlex);
-    WriteFloat(L"Debris", L"fGravityScale", s_values.debrisGravityScale);
-    WriteFloat(L"Debris", L"fDragScale", s_values.debrisDragScale);
-    WriteFloat(L"Debris", L"fRestitutionScale", s_values.debrisRestitutionScale);
-    WriteFloat(L"Debris", L"fFrictionScale", s_values.debrisFrictionScale);
-    WriteFloat(L"Debris", L"fSpawnSpin", s_values.debrisSpawnSpin);
-    WriteFloat(L"Debris", L"fImpactTorque", s_values.debrisImpactTorque);
-    WriteBool(L"Debris", L"bRolling", s_values.debrisRolling);
 
     WriteBool(L"Sharpen", L"bEnabled", s_values.sharpenEnabled);
     WriteFloat(L"Sharpen", L"fSharpness", s_values.sharpness);
@@ -242,13 +221,6 @@ void ApplyToPost()
     post::g_ssao.gi = s_values.giEnabled;
     post::g_ssao.giIntensity = s_values.giIntensity;
 
-    flexshim::g_tune.gravityScale = s_values.debrisGravityScale;
-    flexshim::g_tune.dragScale = s_values.debrisDragScale;
-    flexshim::g_tune.restitutionScale = s_values.debrisRestitutionScale;
-    flexshim::g_tune.frictionScale = s_values.debrisFrictionScale;
-    flexshim::g_tune.spawnSpin = s_values.debrisSpawnSpin;
-    flexshim::g_tune.impactTorque = s_values.debrisImpactTorque;
-    flexshim::g_tune.rolling = s_values.debrisRolling;
 
     post::g_panini.enabled = s_values.paniniEnabled;
     post::g_panini.strength = s_values.paniniStrength;

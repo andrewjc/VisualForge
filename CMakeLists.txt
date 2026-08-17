@@ -709,14 +709,11 @@ add_library(VisualForge SHARED
     src/EngineSettings.cpp
     src/IniWriter.cpp
     src/DepthCapture.cpp
-    src/FlexGuard.cpp
-    src/FlexShim.cpp
     src/IntroSkip.cpp
     src/Lut.cpp
     src/PostProcess.cpp
     src/RendererBackendProbe.cpp
     src/RendererObservation.cpp
-    src/WeaponDebris.cpp
     src/D3D11Hook.cpp
     src/Overlay.cpp
     ${EXTERNAL}/minhook/src/buffer.c

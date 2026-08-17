@@ -6,7 +6,6 @@
 #include "Config.h"
 #include "CrashLog.h"
 #include "D3D11Hook.h"
-#include "FlexShim.h"
 #include "EngineSettings.h"
 #include "EngineCameraCapture.h"
 #include "EngineMeshCapture.h"
@@ -123,11 +122,6 @@ __declspec(dllexport) bool F4SEPlugin_Load(const F4SEInterface* f4se)
     // Live capture control lets the harness arm a capture at a chosen
     // moment instead of firing on whatever the main menu happens to draw.
     static_cast<void>(vf::capture_requests::Configure());
-
-    // Redirect Flex before the engine can reach it. Import-table patching, so it works
-    // whether or not the Flex DLLs have loaded yet.
-    if (vf::config::Get().interceptFlex)
-        vf::flexshim::Install();
 
     if (!vf::d3d::Install())
         vf::log::Write("D3D11 hook installation failed — plugin inert");
