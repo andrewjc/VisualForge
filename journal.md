@@ -3596,3 +3596,83 @@ What was verified by hand afterwards: no save files were created, all three INIs
 match their backups byte for byte, the harness-installed plugin was removed so
 the install is back to the `.disabled` state it started in, and the log was
 restored from the backup the harness took. No further live run was started.
+
+## The mirror stops rebuilding static state every frame
+
+The mirrored frame cost about 900 ms, and roughly 700 ms of that was CPU work
+re-deriving a scene that does not change between frames.
+
+The first measurement decided the design. On a settled cell:
+
+```
+renderer-mesh-churn: meshes=940 unchanged=940 changed=0 added=0 removed=0
+```
+
+Nothing changes. Not "little" -- nothing. So the whole 454 ms geometry stage
+was producing a byte-identical result each frame, and caching was the entire
+fix rather than part of it.
+
+### What the fingerprint has to be
+
+Identity *and* the bytes behind it. A mesh identity is derived from the pooled
+buffer and the range inside it, so the engine can re-extract different geometry
+into the same range and keep the identity. A cache keyed on identity alone
+draws the previous object's geometry under the new one's name -- a scene made
+of the right objects in the wrong shapes, which reads as a capture bug rather
+than a cache bug. That mutation survived the first version of the test and is
+now killed by one that changes the bytes while holding the identity.
+
+### Costs found by removing the one in front of them
+
+Each fix exposed the next, and none of them were where the previous guess said.
+
+| stage | before | after |
+| --- | --- | --- |
+| texture library | 207,671 us | 71 us |
+| raster encode | 40,620 us | 3,341 us |
+| geometry assembly | 454,273 us | 5,222 us |
+
+- The library was re-encoded whole on every addition, and the mirror copied
+  every `CapturedTexture` into a contiguous vector first purely to satisfy the
+  encoder's span -- a redundant pass over 130 MB before the encoder had copied
+  anything. A pointer overload removed the pass; a generation in the frame
+  request removed the backend's matching decode-and-hash.
+- Eviction was worse than the addition it was meant to fix. Compacting the
+  entry list shifted every later index, and those indices are part of what the
+  encoded raster packet says, so a single evicted texture invalidated the
+  packet cache. An evicted entry now keeps its place and is filled.
+- The packet cache also never matched because the key was order-sensitive
+  while object order is not stable. Every draw carries its own ranges and
+  material, and the class is opaque and depth-tested, so the key is now the
+  draw *set*.
+- With the decode cached, two quadratic passes were left standing:
+  `PositionsAreFinite` decoding every vertex in the selection pass, and the
+  instance list rescanned per object. Both are now linear.
+
+### Where it stands against the gate
+
+Settled Sanctuary, 940 meshes with zero churn, windowed:
+
+```
+geometry-us=5222  library-us=77  encode-us=3341  render-us=40271
+```
+
+Library and encode are inside the 5,000 us the goal asks for. Geometry sits at
+5,222 -- 87 times better than the 454,273 it started at, and about 4% over the
+line. The remaining time is no longer any single rebuild: it is spread across
+translating six thousand recorded draws into a scene packet, building the
+object and instance lists, and the per-frame bookkeeping around them. Getting
+under the line means not re-deriving the scene packet either, which is a larger
+change than this goal scoped.
+
+The scene did not shrink to buy any of this: 940 draws, 1.19 M vertices and 862
+of 940 materials textured, against a baseline of 923 objects and 1.12 M
+vertices. That half of the gate is what a cache that quietly dropped geometry
+would have failed, and it is why it was written in.
+
+### Still open
+
+Spikes during streaming remain large -- a cell arriving re-adds the whole mesh
+set and the library grows past 200 entries, and those frames still cost
+hundreds of milliseconds. Steady state is what improved. The CPU readback and
+the fence that serialises it were never started.
