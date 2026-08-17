@@ -2423,7 +2423,8 @@ bool CompositeMirror(
                 "extract-us=%llu assemble-us=%llu",
                 window(s_stageTranslateUs, s_reportedTranslateUs),
                 window(s_stageExtractUs, s_reportedExtractUs),
-                window(s_stageAssembleUs, s_reportedAssembleUs));
+                window(s_stageAssembleUs, s_reportedAssembleUs),
+                window(s_stageCollectUs, s_reportedCollectUs));
         }
     }
     return presented;
