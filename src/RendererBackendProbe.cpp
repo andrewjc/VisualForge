@@ -1235,12 +1235,6 @@ bool BuildLiveSceneGeometry(
         header.scissorHeight = rasterPacket.header.scissorHeight;
         std::memcpy(packetBytes.data(), &header, sizeof(header));
     }
-    // Whether the packet cache is actually holding. The steady state drifts
-    // upward within a run while the mesh set reports unchanged, and a miss
-    // count is the difference between "the machine slowed down" and "the key
-    // stopped matching".
-    static std::uint64_t s_encodeHits = 0;
-    static std::uint64_t s_encodeMisses = 0;
     if (reuseEncoded) {
         ++s_encodeHits;
     } else {
