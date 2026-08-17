@@ -3545,3 +3545,54 @@ change. The signature check makes a *stable* library free, which is the common
 case once a cell settles, but the settling itself is expensive. An incremental
 path that adds only new entries is the obvious next move and is not part of
 this goal.
+
+## Phase 25: world-only draw suppression
+
+`suppression=off` had been a string in about thirty log messages, not a
+mechanism. `EngineTakeover` -- permits, fault phases, the whole-frame rule --
+was fully unit-tested and referenced by nothing outside its own tests. Turning
+suppression on therefore meant implementing phase 25's green step.
+
+- `renderer_core/EngineSuppression` is the draw-time predicate: a draw is
+  dropped only when the permit grants, the draw writes the world target, and
+  something is reproducing the world. Three vetoes, tested across all eight
+  combinations; all four mutations (drop each veto, invert the whole-frame
+  rule) are killed.
+- `depth::SceneDepthBound()` supplies the world-target half. A draw with the
+  main scene depth bound is a world draw; the HUD, the Pip-Boy and every
+  Scaleform surface are not, which is what makes the suppression world-only.
+  The comparison goes through `IUnknown` because only that is identical across
+  an object's interfaces -- the same rule the texture path had to learn -- and
+  it is cached per thread behind a generation counter, so a resize that hands
+  back the same view address cannot leave a stale classification alive.
+- Opt-in via `VISUALFORGE_SUPPRESS_WORLD=1`, exposed as `-SuppressWorldDraws`.
+  Opt-in because the mirror reproduces a subset of the world, so a suppressed
+  frame is incomplete by exactly that subset. The plugin says so in full at
+  startup rather than as a flag value.
+- Draws are recorded before being dropped. The mirror is built out of these
+  draws, so a suppressed frame must observe exactly what an unsuppressed one
+  does or suppression starves the renderer replacing it.
+
+379 tests pass in both configurations.
+
+### The first measurement run produced no measurement, and it is not yet attributed
+
+The run reached the world and was force-killed on the way out, and its restore
+failed with the installed plugin held open by another process. The log it left
+carries no `renderer-backend` or `renderer-mirror` line at all, and
+`vulkanBackendReady` is false, while `result.json` records that both were
+requested. So *none* of the `VISUALFORGE_*` variables took effect in the
+process that wrote that log -- not only the new one.
+
+Environment inheritance through `Start-Process` was tested directly afterwards
+and works, and the harness sets the variable before the launch, unconditionally.
+That rules out the two obvious explanations and leaves the observation
+unattributed. The most consistent reading is that a second, separately launched
+game instance was running -- it would carry none of the variables and would
+hold the plugin DLL open, which is exactly the restore that failed -- but that
+is a hypothesis, not a finding, and it is recorded as one.
+
+What was verified by hand afterwards: no save files were created, all three INIs
+match their backups byte for byte, the harness-installed plugin was removed so
+the install is back to the `.disabled` state it started in, and the log was
+restored from the backup the harness took. No further live run was started.
