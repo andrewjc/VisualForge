@@ -360,13 +360,17 @@ TEST_CASE("P23_backend_ABI_appends_the_post_rules_after_the_indirect_prefix",
 {
     using namespace vf::renderer::abi;
     CHECK(kBackendAbiPhase23Minor == 12);
-    CHECK(kBackendAbiMinor == kBackendAbiPhase23Minor);
+    // At least, not exactly: the texture library appended after bloom moved
+    // the current minor version past phase 23's own. Phase 23's block is
+    // still a real, still-valid prefix of the struct -- it just is not the
+    // tail any longer, which is what the next test pins.
+    CHECK(kBackendAbiMinor >= kBackendAbiPhase23Minor);
     // The post rules begin exactly where the temporal block ended, so a
     // backend built before them reads every field it knows at the offset it
     // expects.
     CHECK(offsetof(RasterFrameRequestV1, bloomThreshold) ==
         kRasterFrameRequestV1IndirectRequiredSize);
-    CHECK(kRasterFrameRequestV1BloomRequiredSize ==
+    CHECK(kRasterFrameRequestV1BloomRequiredSize <=
         sizeof(RasterFrameRequestV1));
     CHECK(sizeof(RasterFrameRequestV1) % 8 == 0);
     // A caller that fills only through the temporal fields declares a size
@@ -374,4 +378,25 @@ TEST_CASE("P23_backend_ABI_appends_the_post_rules_after_the_indirect_prefix",
     // rules supplied" from "rules supplied at a stale offset".
     CHECK(kRasterFrameRequestV1IndirectRequiredSize <
         kRasterFrameRequestV1BloomRequiredSize);
+}
+
+TEST_CASE("PM_backend_ABI_appends_the_texture_library_after_the_bloom_prefix",
+    "[material][contract]")
+{
+    using namespace vf::renderer::abi;
+    CHECK(kBackendAbiTextureLibraryMinor == 13);
+    CHECK(kBackendAbiMinor == kBackendAbiTextureLibraryMinor);
+    // The texture library begins exactly where the post-chain block ended,
+    // so a backend built before it reads every field it knows at the offset
+    // it expects.
+    CHECK(offsetof(RasterFrameRequestV1, textureLibraryData) ==
+        kRasterFrameRequestV1BloomRequiredSize);
+    CHECK(kRasterFrameRequestV1TextureLibraryRequiredSize ==
+        sizeof(RasterFrameRequestV1));
+    CHECK(sizeof(RasterFrameRequestV1) % 8 == 0);
+    // A caller that fills only through the bloom fields declares a size
+    // below the texture-library requirement, which is what lets the backend
+    // tell "no library supplied" from "a library supplied at a stale offset".
+    CHECK(kRasterFrameRequestV1BloomRequiredSize <
+        kRasterFrameRequestV1TextureLibraryRequiredSize);
 }

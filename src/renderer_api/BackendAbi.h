@@ -20,7 +20,8 @@ constexpr std::uint32_t kBackendAbiPhase16Minor = 9;
 constexpr std::uint32_t kBackendAbiPhase17Minor = 10;
 constexpr std::uint32_t kBackendAbiPhase20Minor = 11;
 constexpr std::uint32_t kBackendAbiPhase23Minor = 12;
-constexpr std::uint32_t kBackendAbiMinor = 12;
+constexpr std::uint32_t kBackendAbiTextureLibraryMinor = 13;
+constexpr std::uint32_t kBackendAbiMinor = 13;
 constexpr char kBackendQueryExport[] = "VFRenderer_QueryInterface";
 constexpr std::uint32_t kBridgeImageCount = 3;
 
@@ -288,6 +289,14 @@ struct alignas(8) RasterFrameRequestV1
     float bloomKnee{};
     float bloomIntensity{};
     float bloomReserved{};
+    // The frame's captured textures (EngineTexture's texture library packet),
+    // resolved per material through RasterMaterialV1::textureIndex. Caller
+    // data like the light list: the backend does not invent a fallback
+    // texture set of its own. Absent means every material's index is read
+    // but nothing is bound for it, which is a decode-time refusal rather
+    // than a silently wrong image.
+    std::uint64_t textureLibraryData{};
+    std::uint64_t textureLibrarySize{};
 };
 
 struct alignas(8) RasterStatusV1
@@ -418,6 +427,9 @@ constexpr std::size_t kRasterFrameRequestV1IndirectRequiredSize =
 constexpr std::size_t kRasterFrameRequestV1BloomRequiredSize =
     offsetof(RasterFrameRequestV1, bloomReserved) +
     sizeof(RasterFrameRequestV1::bloomReserved);
+constexpr std::size_t kRasterFrameRequestV1TextureLibraryRequiredSize =
+    offsetof(RasterFrameRequestV1, textureLibrarySize) +
+    sizeof(RasterFrameRequestV1::textureLibrarySize);
 constexpr std::size_t kRasterStatusV1RequiredSize =
     offsetof(RasterStatusV1, reserved);
 constexpr std::size_t kBackendApiV1BridgeRequiredSize =
