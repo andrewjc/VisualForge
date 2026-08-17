@@ -124,6 +124,15 @@ struct RasterizerCounters
 
 [[nodiscard]] RasterizerCounters RasterizerState() noexcept;
 
+// Per-register occupancy of the draws whose base colour could not be resolved,
+// plus how many had no pixel-shader resource bound at all. Writes up to
+// `capacity` slots and returns how many; `noResources` is the population that
+// genuinely had nothing to find.
+[[nodiscard]] std::size_t MissingBaseColorSlots(
+    std::uint64_t* destination,
+    std::size_t capacity,
+    std::uint64_t& noResources) noexcept;
+
 // Why meshes are or are not decodable, as counts rather than as a guess.
 // `recorded` at zero means the hook was installed after the engine built its
 // vertex formats and every mesh will be declined; misses against a healthy

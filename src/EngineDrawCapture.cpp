@@ -177,6 +177,7 @@ std::atomic<std::uint64_t> s_drawsKnownCull{};
 std::atomic<std::uint64_t> s_drawsUnknownCull{};
 std::atomic<std::uint64_t> s_drawsFrontCcw{};
 std::atomic<std::uint64_t> s_drawsFrontCw{};
+
 void* s_setVsConstantBuffersAddress = nullptr;
 void* s_setPsConstantBuffersAddress = nullptr;
 void* s_mapAddress = nullptr;
@@ -268,6 +269,16 @@ std::atomic<std::uint32_t> s_shadersWithBaseColor{};
 // this size is a single cache line's worth of pointers per thread.
 constexpr std::size_t kTrackedPixelShaderSlots = 16;
 thread_local void* t_pixelShaderResources[kTrackedPixelShaderSlots] = {};
+// Which pixel-shader resource registers a draw had bound when base-colour
+// resolution failed.
+//
+// "Nothing is bound where the shader said" is only actionable if it also says
+// where things *were* bound. A population that consistently carries a texture
+// at register 1 or 2 is a slot rule that is too narrow, and is a different
+// defect from a draw that genuinely binds no textures at all.
+std::array<std::atomic<std::uint64_t>, kTrackedPixelShaderSlots>
+    s_missingSlotOccupancy{};
+std::atomic<std::uint64_t> s_missingWithNoResources{};
 std::atomic<std::uint64_t> s_psResourceNotices{};
 std::atomic<std::uint64_t> s_drawsWithBaseColor{};
 std::atomic<std::uint64_t> s_drawsMissingBaseColor{};
@@ -662,6 +673,23 @@ void DescribeShader(
     return 0;
 }
 
+// Where this draw did have resources bound, recorded when base-colour
+// resolution failed. Counted per register rather than as one total, because
+// "the rule looked in the wrong place" and "there was nothing to find" need
+// different fixes and look identical in a single number.
+void NoteMissingSlots() noexcept
+{
+    auto any = false;
+    for (std::size_t slot = 0; slot < kTrackedPixelShaderSlots; ++slot) {
+        if (t_pixelShaderResources[slot] == nullptr) continue;
+        s_missingSlotOccupancy[slot].fetch_add(1, std::memory_order_relaxed);
+        any = true;
+    }
+    if (!any) {
+        s_missingWithNoResources.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 // The base-colour texture for a draw about to run on this thread, resolved
 // through the shader that will shade it.
 [[nodiscard]] std::uint64_t CurrentBaseColorTexture() noexcept
@@ -716,6 +744,7 @@ void DescribeShader(
     }
     if (slot >= kTrackedPixelShaderSlots) {
         s_drawsMissingBaseColor.fetch_add(1, std::memory_order_relaxed);
+        NoteMissingSlots();
         return 0;
     }
     const auto resource = ResolveViewResource(t_pixelShaderResources[slot]);
@@ -725,6 +754,7 @@ void DescribeShader(
         // rule would take, and it has to be distinguishable from a technique
         // that simply has no albedo.
         s_drawsMissingBaseColor.fetch_add(1, std::memory_order_relaxed);
+        NoteMissingSlots();
         return 0;
     }
     if (byConvention) {
@@ -1353,6 +1383,20 @@ LayoutStats LayoutCounters() noexcept
 std::uint32_t LayoutOverflowCount() noexcept
 {
     return s_layoutOverflow.load(std::memory_order_relaxed);
+}
+
+std::size_t MissingBaseColorSlots(
+    std::uint64_t* const destination,
+    const std::size_t capacity,
+    std::uint64_t& noResources) noexcept
+{
+    noResources = s_missingWithNoResources.load(std::memory_order_relaxed);
+    const auto count = std::min(capacity, kTrackedPixelShaderSlots);
+    for (std::size_t slot = 0; slot < count; ++slot) {
+        destination[slot] =
+            s_missingSlotOccupancy[slot].load(std::memory_order_relaxed);
+    }
+    return count;
 }
 
 RasterizerCounters RasterizerState() noexcept

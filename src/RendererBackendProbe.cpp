@@ -1206,6 +1206,26 @@ bool BuildLiveSceneGeometry(
                 static_cast<unsigned long long>(raster.drawsFrontCcw),
                 static_cast<unsigned long long>(raster.drawsFrontCw));
         }
+        {
+            // Where the failing draws did bind textures. A register that
+            // carries most of this population is the one the slot rule should
+            // be reading, and `none` is the share that had nothing to find at
+            // any register -- a different defect with a different fix.
+            std::array<std::uint64_t, 16> slots{};
+            std::uint64_t noResources = 0;
+            const auto written = engine_draw_capture::MissingBaseColorSlots(
+                slots.data(), slots.size(), noResources);
+            std::string message{"renderer-basecolor-slots: none="};
+            message += std::to_string(noResources);
+            for (std::size_t slot = 0; slot < written; ++slot) {
+                if (slots[slot] == 0) continue;
+                message += " t";
+                message += std::to_string(slot);
+                message += "=";
+                message += std::to_string(slots[slot]);
+            }
+            log::Write("%s", message.c_str());
+        }
         log::Write("renderer-basecolor-null: no-shader=%llu explicit-null=%llu "
             "never-set=%llu null-scene-depth=%llu null-other-target=%llu",
             static_cast<unsigned long long>(constants.drawsNoShader),
