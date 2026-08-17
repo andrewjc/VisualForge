@@ -403,6 +403,8 @@ std::uint64_t s_stageGeometryUs = 0;
 // what is left has to be attributed rather than guessed at.
 std::uint64_t s_stageCollectUs = 0;
 std::uint64_t s_stageTranslateUs = 0;
+std::uint64_t s_stageExtractUs = 0;
+std::uint64_t s_reportedExtractUs = 0;
 std::uint64_t s_stageMeshBuildUs = 0;
 std::uint64_t s_stageAssembleUs = 0;
 std::uint64_t s_reportedCollectUs = 0;
@@ -762,9 +764,13 @@ bool BuildLiveSceneGeometry(
     drawstream::ExtractionBudget budget{};
     budget.maximumMeshesPerFrame = 64;
     budget.maximumIndexBytesPerFrame = 8ull << 20;
+    const auto extractStarted = std::chrono::steady_clock::now();
     const auto plan =
         drawstream::PlanMeshExtraction(frame, {}, cached, budget);
     static_cast<void>(engine_mesh_extractor::Extract(plan.requests));
+    s_stageExtractUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - extractStarted).count());
 
     const auto meshBuildStarted = std::chrono::steady_clock::now();
     std::vector<drawstream::AssembledMesh> meshes;
@@ -903,8 +909,12 @@ bool BuildLiveSceneGeometry(
     // Taken before the call, because a rejected assembly clears the objects it
     // was given and the count is the first thing worth knowing about it.
     const auto offered = scenePacket.objects.size();
+    const auto assembleStarted = std::chrono::steady_clock::now();
     const auto assembled = drawstream::AssembleSceneGeometry(scenePacket,
         meshes, rasterPacket, assembly, &s_arena);
+    s_stageAssembleUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - assembleStarted).count());
     if (assembled != drawstream::DrawStreamError::None) {
         // The arena describes geometry this assembly did not finish, so it
         // must not be carried into the next frame.
