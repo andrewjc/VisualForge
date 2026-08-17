@@ -3676,3 +3676,54 @@ Spikes during streaming remain large -- a cell arriving re-adds the whole mesh
 set and the library grows past 200 entries, and those frames still cost
 hundreds of milliseconds. Steady state is what improved. The CPU readback and
 the fence that serialises it were never started.
+
+### The three stages are not independent
+
+`geometry-us` is the outer timer around `BuildLiveSceneGeometry`, and both the
+texture library build and the raster encode happen inside it. So geometry can
+never be smaller than library plus encode, and reading the three as separate
+budgets overstates what is left. Attributed on a settled cell:
+
+```
+geometry-us=4987
+  encode-us=3363  library-us=77
+  translate-us=253  extract-us=115  assemble-us=250  collect-us=50
+```
+
+The named parts come to 668 us. Encode is the bulk of the rest, and it is
+already 12 times better than it was.
+
+### What the last passes found
+
+Each remaining chunk was something re-derived per frame rather than a rebuild
+of the scene itself:
+
+- `FindInputLayout` scans a fixed table of five hundred atomic slots and then
+  *rebuilds* the vertex layout from its element descriptors. Doing that for all
+  nine hundred meshes every frame re-derived a few dozen distinct layouts that
+  never change. Memoised on layout and stride.
+- Two thirds of recorded draws are depth-only or off-screen and are rejected
+  before they can become an object, yet each was paying for an identity hash
+  and two probes into persistent maps.
+
+Two changes were tried and reverted or recorded rather than kept:
+
+- Caching the derived scene packet never hit. The recorded draw stream varies
+  between frames -- 6,268 draws one frame and 5,941 the next -- while the mesh
+  set it produces does not, so a key over the draws could not match and the
+  signature was pure added cost. Reverted.
+- Skipping revalidation of meshes already in the arena is an equivalent mutant:
+  no test can distinguish it, because it only repeats a check whose answer is
+  known. Kept for the frame time and labelled as such.
+
+### Where it lands
+
+Quiet settled windows meet all three: geometry 4,914-4,988, library 70-80,
+encode 3,306-3,414. Windows in the same run that are not quiet do not: geometry
+reaches 11,042 when the texture library gains or loses entries, which changes
+material indices and legitimately invalidates the packet cache. That is a real
+remaining cost and not a measurement artefact.
+
+The frame went from about 900 ms to about 44 ms. The scene did not shrink to
+buy it: 940 draws, 1.15 M vertices, 862 of 940 materials textured, against a
+baseline of 923 objects and 1.12 M vertices.
