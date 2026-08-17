@@ -383,6 +383,9 @@ std::uint64_t s_mirrorLibraryGeneration = 0;
 // prune is never catching up.
 std::uint64_t s_mirrorLibraryDeferredPrunes = 0;
 std::vector<std::uint64_t> s_mirrorLibraryIds;
+// Whether each entry.s texture was resident last frame. A change either way
+// rebuilds the library bytes, while the index the entry occupies never moves.
+std::vector<bool> s_mirrorLibraryResident;
 std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 // A once-per-session measurement of what the texture library is worth: the
 // same frame rendered with it withheld, so the difference between the two
@@ -931,22 +934,28 @@ bool BuildLiveSceneGeometry(
         // index would end up naming a different texture -- which is worse than
         // the white it would otherwise have shown.
         {
-            std::vector<std::uint64_t> survivors;
-            survivors.reserve(s_mirrorLibraryIds.size());
-            for (const auto id : s_mirrorLibraryIds) {
-                if (engine_texture_residency::Find(id) != nullptr) {
-                    survivors.push_back(id);
+            // An index, once handed to a material, is never moved again.
+            //
+            // Compacting the list on eviction shifted every later index, and
+            // those indices are part of what the encoded raster packet says,
+            // so a single evicted texture invalidated the packet cache and
+            // forced a full 82 MB re-encode. Streaming a cell evicts textures
+            // continuously, so that turned a cache that should always hit into
+            // one that mostly missed.
+            //
+            // An evicted entry keeps its place and is filled with a flat
+            // fallback until it is resident again. The material still names
+            // the same index, and shades from base colour meanwhile, which is
+            // what it did before the texture ever arrived.
+            s_mirrorLibraryResident.resize(s_mirrorLibraryIds.size(), false);
+            for (std::size_t slot = 0; slot < s_mirrorLibraryIds.size();
+                ++slot) {
+                const auto resident = engine_texture_residency::Find(
+                    s_mirrorLibraryIds[slot]) != nullptr;
+                if (resident != s_mirrorLibraryResident[slot]) {
+                    s_mirrorLibraryResident[slot] = resident;
+                    dirty = true;
                 }
-            }
-            if (survivors.size() != s_mirrorLibraryIds.size()) {
-                s_mirrorLibraryIds = std::move(survivors);
-                s_mirrorLibraryIndexOf.clear();
-                for (std::size_t slot = 0; slot < s_mirrorLibraryIds.size();
-                    ++slot) {
-                    s_mirrorLibraryIndexOf.emplace(s_mirrorLibraryIds[slot],
-                        static_cast<std::uint32_t>(slot));
-                }
-                dirty = true;
             }
         }
         const auto materialCount = std::min(
@@ -977,6 +986,7 @@ bool BuildLiveSceneGeometry(
                     static_cast<std::uint32_t>(
                         s_mirrorLibraryIds.size())).first;
                 s_mirrorLibraryIds.push_back(found->second);
+                s_mirrorLibraryResident.push_back(true);
                 dirty = true;
             }
             rasterPacket.materials[index].textureIndex = existing->second;
@@ -989,14 +999,13 @@ bool BuildLiveSceneGeometry(
             // it happened every time a single texture was added.
             std::vector<const texture::CapturedTexture*> library;
             library.reserve(s_mirrorLibraryIds.size());
-            auto complete = true;
+            // A slot whose texture is no longer resident is filled rather
+            // than dropped, so every later index keeps its meaning.
+            static const auto s_evictedFill =
+                texture::MakeFallbackTexture(texture::FallbackTextureRole::White);
             for (const auto id : s_mirrorLibraryIds) {
                 const auto* const resident = engine_texture_residency::Find(id);
-                if (resident == nullptr) {
-                    complete = false;
-                    break;
-                }
-                library.push_back(resident);
+                library.push_back(resident != nullptr ? resident : &s_evictedFill);
             }
             // An entry was evicted between the prune above and here. The
             // re-encode is abandoned rather than compacted: materials have
@@ -1005,7 +1014,7 @@ bool BuildLiveSceneGeometry(
             // previous bytes stay, any index past them resolves to the
             // sentinel in the backend, and next frame's prune fixes it before
             // a single material is assigned.
-            if (complete) {
+            {
                 // What the library is actually made of.
                 //
                 // Ninety-three percent of textured draws resolve their base
@@ -1029,13 +1038,15 @@ bool BuildLiveSceneGeometry(
                 }
                 log::Write("%s", message.c_str());
             }
-            if (!complete) {
-                s_mirrorLibraryDeferredPrunes += 1;
-            } else if (texture::EncodeTextureLibrary(
+            if (texture::EncodeTextureLibrary(
                 library, s_mirrorTextureLibrary) !=
                     texture::TexturePacketError::None) {
+                // The only way out now that eviction is filled rather than
+                // dropped. Starting the library over is correct and costs the
+                // frames it takes to refill.
                 s_mirrorLibraryIds.clear();
                 s_mirrorLibraryIndexOf.clear();
+                s_mirrorLibraryResident.clear();
                 s_mirrorTextureLibrary.clear();
             }
             // Bumped on both paths: an emptied library is as much a change as
