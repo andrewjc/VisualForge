@@ -439,15 +439,28 @@ DrawStreamError AssembleSceneGeometry(
         keptObjects.reserve(packet.objects.size());
         keptInstances.reserve(packet.instances.size());
 
+        // Indexed once rather than searched per object. This was a linear scan
+        // inside the object loop, so a settled cell of nine hundred objects
+        // over nine hundred meshes did most of a million comparisons a frame
+        // and cost 54 ms after the decode itself had been cached away.
+        std::unordered_map<std::uint64_t, const AssembledMesh*> byIdentity;
+        byIdentity.reserve(meshes.size());
+        for (const auto& mesh : meshes) {
+            if (mesh.vertexStride < sizeof(float) * 3 ||
+                mesh.indices.empty() || mesh.vertices.empty()) {
+                continue;
+            }
+            // First wins, exactly as the scan did: it stopped at the first
+            // match and later duplicates were never reachable.
+            byIdentity.emplace(mesh.identity, &mesh);
+        }
+
         for (std::size_t index = 0; index < packet.objects.size(); ++index) {
             const AssembledMesh* found = nullptr;
-            for (const auto& mesh : meshes) {
-                if (mesh.identity == packet.objects[index].objectId &&
-                    mesh.vertexStride >= sizeof(float) * 3 &&
-                    !mesh.indices.empty() && !mesh.vertices.empty()) {
-                    found = &mesh;
-                    break;
-                }
+            if (const auto entry =
+                    byIdentity.find(packet.objects[index].objectId);
+                entry != byIdentity.end()) {
+                found = entry->second;
             }
             if (found == nullptr) {
                 ++result.missingMeshes;

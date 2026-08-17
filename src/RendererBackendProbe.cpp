@@ -403,6 +403,11 @@ std::uint64_t s_stageRenderUs = 0;
 std::uint64_t s_stagePresentUs = 0;
 // What the last report already accounted for, so each line covers only the
 // frames since the previous one.
+// Frames per stage report. Thirty rather than a hundred and twenty because a
+// window that spans a cell streaming in reports the streaming, not the steady
+// state: the mirror settles for only a few seconds inside a capture, and a
+// long window never lands wholly inside it.
+constexpr std::uint64_t kStageReportInterval = 30;
 std::uint64_t s_reportedGeometryUs = 0;
 std::uint64_t s_reportedLibraryUs = 0;
 std::uint64_t s_reportedEncodeUs = 0;
@@ -1086,18 +1091,39 @@ bool BuildLiveSceneGeometry(
     // Every field of the packet that is not vertex or index data. The arrays
     // themselves are covered by their sizes plus the arena's own rule: a mesh
     // only keeps its slot while it still names the same bytes.
+    fold(rasterPacket.draws.size());
+    fold(rasterPacket.materials.size());
+    // Order-independent, because the order genuinely is not part of what the
+    // frame looks like here and it is not stable.
+    //
+    // Objects are grouped in draw-submission order, which the engine varies
+    // between frames, so an order-sensitive key never matched twice and the
+    // packet was re-encoded every frame -- 50 ms for 67 MB that had not
+    // changed. Every draw carries its own vertex range, index range and
+    // material id, and this class is opaque and depth-tested, so a permutation
+    // of the same draws is the same picture.
+    std::uint64_t drawSet = 0;
     for (const auto& draw : rasterPacket.draws) {
-        fold(draw.firstIndex);
-        fold(draw.indexCount);
-        fold(static_cast<std::uint64_t>(
-            static_cast<std::uint32_t>(draw.vertexOffset)));
-        fold(draw.materialId);
-        fold(static_cast<std::uint64_t>(draw.frontFace));
+        std::uint64_t one = 0xCBF2'9CE4'8422'2325ull;
+        for (const auto field : {static_cast<std::uint64_t>(draw.firstIndex),
+                 static_cast<std::uint64_t>(draw.indexCount),
+                 static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(draw.vertexOffset)),
+                 draw.materialId,
+                 static_cast<std::uint64_t>(draw.frontFace)}) {
+            one = (one ^ field) * 0x0000'0100'0000'01B3ull;
+        }
+        drawSet ^= one;
     }
+    fold(drawSet);
+    std::uint64_t materialSet = 0;
     for (const auto& material : rasterPacket.materials) {
-        fold(material.resourceId);
-        fold(material.textureIndex);
+        std::uint64_t one = 0xCBF2'9CE4'8422'2325ull;
+        one = (one ^ material.resourceId) * 0x0000'0100'0000'01B3ull;
+        one = (one ^ material.textureIndex) * 0x0000'0100'0000'01B3ull;
+        materialSet ^= one;
     }
+    fold(materialSet);
     static std::uint64_t s_encodedSignature = 0;
     static bool s_encodedValid = false;
     const auto reuseEncoded = s_encodedValid &&
@@ -2277,7 +2303,7 @@ bool CompositeMirror(
         // Reported as a running mean and a worst case rather than per frame: a
         // line per frame is unreadable at sixty of them a second, and a mean
         // alone hides the stall that the library rebuild puts in one frame.
-        if (s_mirrorTimedFrames % 120 == 0) {
+        if (s_mirrorTimedFrames % kStageReportInterval == 0) {
             const auto counters = world_suppression::Snapshot();
             log::Write("renderer-suppression: frames=%llu mirror-mean-us=%llu "
                 "mirror-worst-us=%llu suppressed=%llu forwarded=%llu "
@@ -2301,7 +2327,7 @@ bool CompositeMirror(
                                    std::uint64_t& reported) {
                 const auto delta = total - reported;
                 reported = total;
-                return static_cast<unsigned long long>(delta / 120);
+                return static_cast<unsigned long long>(delta / kStageReportInterval);
             };
             log::Write("renderer-suppression-stages: geometry-us=%llu "
                 "library-us=%llu encode-us=%llu lighting-us=%llu "
