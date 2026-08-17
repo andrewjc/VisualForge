@@ -3761,3 +3761,37 @@ rising alongside it. That points at the present path -- the submit, the fence
 and the readback -- accumulating back-pressure, which is step 4 of the goal and
 was never started. It is not the geometry, the library or the encode: those are
 each doing the same work in the first window and the last.
+
+### The drift was churn, and `encode-us` over-attributes
+
+With hit and miss counters on the packet cache the question settles:
+
+```
+01:15:24  encode-cache hits=4641 misses=110   geometry-us=4922 encode-us=3337
+01:15:26  encode-cache hits=4671 misses=110   geometry-us=4935 encode-us=3321
+01:15:30  encode-cache hits=4731 misses=110   geometry-us=4919 encode-us=3329
+01:15:31  encode-cache hits=4761 misses=110   geometry-us=4967 encode-us=3338
+01:15:33  encode-cache hits=4789 misses=112   geometry-us=7850 encode-us=6226
+```
+
+Hits advance by exactly thirty per window -- the window length -- with misses
+flat, so the cache holds on every frame of those windows. 97.7% cumulative.
+The window that jumps is the one whose churn line reports `added=2`: new
+geometry genuinely has to be encoded, and a window where the mesh set changes
+is not a settled window.
+
+The earlier runs that drifted to 19,000 us were runs with continuous churn, not
+runs where a cache had stopped working.
+
+Two caveats on the numbers themselves, both mine:
+
+- `encode-us` is measured by a timer declared at function scope, so it runs to
+  the end of `BuildLiveSceneGeometry` and includes the scene packet encode and
+  everything after it. It is an upper bound on the raster encode, not the
+  raster encode. On a cache hit the raster encode is a hundred-byte header
+  patch, so most of that 3,337 us is something else inside the same span.
+- `geometry-us` contains `library-us` and `encode-us`, so the three are not
+  independent budgets and cannot be added.
+
+Neither changes what the mirror does; both change what the log means, which is
+worth stating before someone reads the three numbers as separable.
