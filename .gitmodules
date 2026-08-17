@@ -1,0 +1,9 @@
+[submodule "external/Catch2"]
+	path = external/Catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "external/common"]
+	path = external/common
+	url = https://github.com/ianpatt/common.git
+[submodule "external/f4se"]
+	path = external/f4se
+	url = https://github.com/ianpatt/f4se.git
