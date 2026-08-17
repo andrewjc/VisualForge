@@ -2424,7 +2424,7 @@ bool CompositeMirror(
                 window(s_stageRenderUs, s_reportedRenderUs),
                 window(s_stagePresentUs, s_reportedPresentUs));
             log::Write("renderer-suppression-geometry: translate-us=%llu "
-                "extract-us=%llu assemble-us=%llu",
+                "extract-us=%llu assemble-us=%llu collect-us=%llu",
                 window(s_stageTranslateUs, s_reportedTranslateUs),
                 window(s_stageExtractUs, s_reportedExtractUs),
                 window(s_stageAssembleUs, s_reportedAssembleUs),
