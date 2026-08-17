@@ -371,11 +371,50 @@ std::vector<std::byte> s_mirrorLight;
 // texture its draws sampled. Objects outlive a single draw, so the identity is
 // keyed by the mesh identity the object was built from.
 std::vector<std::byte> s_mirrorTextureLibrary;
+// The library entries in index order, and the reverse mapping. Persistent so
+// an index handed to a material stays valid across frames and the bytes only
+// have to be rebuilt when the set actually gains a texture.
+std::vector<std::uint64_t> s_mirrorLibraryIds;
+std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 // A once-per-session measurement of what the texture library is worth: the
 // same frame rendered with it withheld, so the difference between the two
 // images is attributable to per-material textures and nothing else. Held
 // rather than discarded so the comparison runs on identical geometry, lights
 // and camera -- a later frame would differ for reasons of its own.
+// Where a mirrored frame's time actually goes. Split by stage because the
+// total alone cannot distinguish a slow renderer from a slow assembler, and
+// the mirror does a great deal of CPU work before the backend sees anything.
+//
+// Plain integers rather than atomics: every one of these is written only from
+// the mirror path, which runs on the presenting thread.
+std::uint64_t s_stageGeometryUs = 0;
+std::uint64_t s_stageLibraryUs = 0;
+std::uint64_t s_stageEncodeUs = 0;
+std::uint64_t s_stageLightingUs = 0;
+std::uint64_t s_stageRenderUs = 0;
+std::uint64_t s_stagePresentUs = 0;
+
+class StageTimer
+{
+public:
+    explicit StageTimer(std::uint64_t& sink) noexcept
+        : sink_(sink), started_(std::chrono::steady_clock::now())
+    {
+    }
+    StageTimer(const StageTimer&) = delete;
+    StageTimer& operator=(const StageTimer&) = delete;
+    ~StageTimer()
+    {
+        sink_ += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started_).count());
+    }
+
+private:
+    std::uint64_t& sink_;
+    std::chrono::steady_clock::time_point started_;
+};
+
 std::uint64_t s_mirrorMicrosecondsTotal = 0;
 std::uint64_t s_mirrorMicrosecondsWorst = 0;
 std::uint64_t s_mirrorTimedFrames = 0;
@@ -754,14 +793,19 @@ bool BuildLiveSceneGeometry(
     // AssembleSceneGeometry emits exactly one material per surviving object,
     // in object order, which is what lets the two be matched up here without
     // threading a resolver through the assembler itself.
-    s_mirrorTextureLibrary.clear();
-    s_mirrorLibraryTextures = 0;
     s_mirrorTexturedMaterials = 0;
     s_mirrorProbeMaterialCount =
         static_cast<std::uint32_t>(rasterPacket.materials.size());
     {
-        std::vector<texture::CapturedTexture> library;
-        std::unordered_map<std::uint64_t, std::uint32_t> indexOf;
+        StageTimer timer{s_stageLibraryUs};
+        // The library survives the frame, and its entries keep their indices.
+        //
+        // It used to be copied and re-encoded from scratch every frame: at 114
+        // textures that is 123 MB of memcpy per frame for a set that does not
+        // change while the player stands still, and it measured 64 ms of a 177
+        // ms frame. Now an index is handed out once and the bytes are rebuilt
+        // only when a texture is actually added.
+        auto dirty = s_mirrorTextureLibrary.empty();
         const auto materialCount = std::min(
             rasterPacket.materials.size(), scenePacket.objects.size());
         for (std::size_t index = 0; index < materialCount; ++index) {
@@ -770,31 +814,59 @@ bool BuildLiveSceneGeometry(
             if (found == s_mirrorObjectTextures.end() || found->second == 0) {
                 continue;
             }
-            auto existing = indexOf.find(found->second);
-            if (existing == indexOf.end()) {
-                const auto* const resident =
-                    engine_texture_residency::Find(found->second);
+            auto existing = s_mirrorLibraryIndexOf.find(found->second);
+            if (existing == s_mirrorLibraryIndexOf.end()) {
+                if (s_mirrorLibraryIds.size() >=
+                    scene::kSceneMaterialTextureCapacity) {
+                    // Full. The rest keep the sentinel and shade from base
+                    // colour, which is a partially textured frame rather than
+                    // an index pointing past the bound array.
+                    continue;
+                }
                 // Resident is not guaranteed: the engine streams textures in
                 // and the budget is finite. A material whose texture is not
                 // held keeps the sentinel and shades from base colour, which
                 // is a partially textured frame rather than a wrong one.
-                if (resident == nullptr) continue;
-                existing = indexOf.emplace(found->second,
-                    static_cast<std::uint32_t>(library.size())).first;
-                library.push_back(*resident);
+                if (engine_texture_residency::Find(found->second) == nullptr) {
+                    continue;
+                }
+                existing = s_mirrorLibraryIndexOf.emplace(found->second,
+                    static_cast<std::uint32_t>(
+                        s_mirrorLibraryIds.size())).first;
+                s_mirrorLibraryIds.push_back(found->second);
+                dirty = true;
             }
             rasterPacket.materials[index].textureIndex = existing->second;
             ++s_mirrorTexturedMaterials;
         }
-        if (!library.empty()) {
-            s_mirrorLibraryTextures = static_cast<std::uint32_t>(library.size());
-            if (texture::EncodeTextureLibrary(library, s_mirrorTextureLibrary) !=
-                texture::TexturePacketError::None) {
+        if (dirty && !s_mirrorLibraryIds.empty()) {
+            std::vector<texture::CapturedTexture> library;
+            library.reserve(s_mirrorLibraryIds.size());
+            auto complete = true;
+            for (const auto id : s_mirrorLibraryIds) {
+                const auto* const resident = engine_texture_residency::Find(id);
+                if (resident == nullptr) {
+                    complete = false;
+                    break;
+                }
+                library.push_back(*resident);
+            }
+            // An entry the map still names has been evicted, so the indices
+            // already handed out this frame no longer describe the library.
+            // Dropping the whole mapping rebuilds it next frame; the indices
+            // written into this frame's materials then exceed the library the
+            // backend holds, and `ResolveMaterialTextureIndex` turns each of
+            // them back into the sentinel rather than sampling a stale entry.
+            if (!complete ||
+                texture::EncodeTextureLibrary(library, s_mirrorTextureLibrary) !=
+                    texture::TexturePacketError::None) {
+                s_mirrorLibraryIds.clear();
+                s_mirrorLibraryIndexOf.clear();
                 s_mirrorTextureLibrary.clear();
-                s_mirrorLibraryTextures = 0;
-                s_mirrorTexturedMaterials = 0;
             }
         }
+        s_mirrorLibraryTextures =
+            static_cast<std::uint32_t>(s_mirrorLibraryIds.size());
     }
 
     {
@@ -823,6 +895,7 @@ bool BuildLiveSceneGeometry(
     rasterPacket.header.scissorWidth = width;
     rasterPacket.header.scissorHeight = height;
 
+    StageTimer encodeTimer{s_stageEncodeUs};
     const auto encoded = raster::EncodePacket(rasterPacket, packetBytes);
     if (!encoded) {
         log::Write("renderer-mirror: live geometry rejected error=%s",
@@ -1621,6 +1694,7 @@ bool CompositeMirrorImpl(
     drawstream::TranslationResult translated{};
     auto liveScene = false;
     try {
+        StageTimer geometryTimer{s_stageGeometryUs};
         liveScene = BuildLiveSceneGeometry(width, height,
             framePacket.header.frameId, framePacket.views.front().viewId,
             framePacket.views.front(), world.originCandidates,
@@ -1686,7 +1760,10 @@ bool CompositeMirrorImpl(
     // no light packet, the backend has no environment, and every surface
     // renders as flat albedo -- which is exactly what the mirrored scene
     // looked like.
-    BuildMirrorLighting();
+    {
+        StageTimer lightingTimer{s_stageLightingUs};
+        BuildMirrorLighting();
+    }
     if (!s_mirrorLightEverLogged ||
         s_mirrorLightError != s_mirrorLightLogged ||
         s_mirrorLightCandidates != s_mirrorLightCandidatesLogged) {
@@ -1766,7 +1843,12 @@ bool CompositeMirrorImpl(
 
     abi::RasterStatusV1 status{};
     status.structSize = sizeof(status);
-    if (!s_host.RenderRasterFrame(request, status)) {
+    const auto renderStarted = std::chrono::steady_clock::now();
+    const auto renderOk = s_host.RenderRasterFrame(request, status);
+    s_stageRenderUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - renderStarted).count());
+    if (!renderOk) {
         if (!s_mirrorRenderFaultLogged) {
             log::Write(
                 "renderer-mirror: render failed diagnostic=%s; frame remains "
@@ -1824,6 +1906,7 @@ bool CompositeMirrorImpl(
             reinterpret_cast<void**>(&backbuffer)))) {
         return decline("backbuffer");
     }
+    StageTimer presentTimer{s_stagePresentUs};
     const auto submitted = s_bridge->SubmitImage(
         s_host, backbuffer, s_bridgeFrame++, s_mirrorPixels.data(),
         static_cast<std::uint64_t>(s_mirrorPixels.size()) *
@@ -1937,6 +2020,26 @@ bool CompositeMirror(
                 static_cast<unsigned long long>(counters.suppressed),
                 static_cast<unsigned long long>(counters.forwarded),
                 presented ? "yes" : "no");
+            // The same frame, broken down. Means rather than totals so the
+            // numbers add up against mirror-mean-us above and a stage can be
+            // read as a share of the frame directly. `geometry` contains
+            // `library` and `encode`, which are reported inside it because
+            // each has its own fix.
+            log::Write("renderer-suppression-stages: geometry-us=%llu "
+                "library-us=%llu encode-us=%llu lighting-us=%llu "
+                "render-us=%llu present-us=%llu",
+                static_cast<unsigned long long>(
+                    s_stageGeometryUs / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_stageLibraryUs / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_stageEncodeUs / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_stageLightingUs / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_stageRenderUs / s_mirrorTimedFrames),
+                static_cast<unsigned long long>(
+                    s_stagePresentUs / s_mirrorTimedFrames));
         }
     }
     return presented;
