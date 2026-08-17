@@ -1,5 +1,6 @@
 add_executable(vf_unit_tests
     unit/EngineMeshTests.cpp
+    unit/EngineSuppressionTests.cpp
     unit/EngineMaterialTests.cpp
     unit/EngineMaterialFamilyTests.cpp
     unit/EngineLightingTests.cpp

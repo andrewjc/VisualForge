@@ -549,6 +549,7 @@ add_library(vf_core STATIC
     src/renderer_core/EngineDeformation.cpp
     src/renderer_core/EngineScene.cpp
     src/renderer_core/EngineTakeover.cpp
+    src/renderer_core/EngineSuppression.cpp
     src/renderer_core/EngineTerrain.cpp
     src/renderer_core/EngineVisibility.cpp
     src/renderer_core/SceneDatabase.cpp
