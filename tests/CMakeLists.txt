@@ -255,6 +255,18 @@ if(TARGET VisualForgeRenderer)
         RUN_SERIAL TRUE
     )
 
+    add_test(NAME contract.texture_library_frame
+        COMMAND $<TARGET_FILE:vf_packet_replay>
+            --render-texture-library
+            --backend $<TARGET_FILE:VisualForgeRenderer>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/texture-library.ppm
+            --validation
+    )
+    set_tests_properties(contract.texture_library_frame PROPERTIES
+        LABELS "contract;gpu;phase16"
+        RUN_SERIAL TRUE
+    )
+
     add_test(NAME contract.lit_scene_frame
         COMMAND $<TARGET_FILE:vf_packet_replay>
             --render-family-scene

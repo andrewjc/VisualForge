@@ -3593,7 +3593,8 @@ bool SubmitScene(
     const std::uint32_t width,
     const std::uint32_t height,
     const bool shrinkGBuffer,
-    SceneSubmission& submission)
+    SceneSubmission& submission,
+    const std::vector<std::byte>* libraryBytes = nullptr)
 {
     submission = {};
     const auto pixelCount = static_cast<std::size_t>(width) * height;
@@ -3630,6 +3631,14 @@ bool SubmitScene(
         if (shrinkGBuffer) {
             request.gbufferCapacity -= sizeof(scene::GBufferPixelV1);
         }
+    }
+    // Optional, so that the same submission path serves the frames that
+    // supply a library and the frames that withhold one -- which is exactly
+    // the pair the texture contract renders.
+    if (libraryBytes != nullptr && !libraryBytes->empty()) {
+        request.textureLibraryData = reinterpret_cast<std::uintptr_t>(
+            libraryBytes->data());
+        request.textureLibrarySize = libraryBytes->size();
     }
     submission.status.structSize = sizeof(submission.status);
     const auto result = host.RenderRasterFrame(request, submission.status);
@@ -4756,6 +4765,271 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
 // nothing else can carry the target's light there: the lights are identical,
 // the target is not visible on the mirror's own pixels, and the indirect path
 // returns black. What is left is the traced reflection.
+// One 1x1 texture of a single flat colour, so a pixel's colour says which
+// library entry the device sampled and nothing else.
+texture::CapturedTexture MakeFlatLibraryTexture(
+    const std::uint64_t resourceId,
+    const std::uint8_t red,
+    const std::uint8_t green,
+    const std::uint8_t blue)
+{
+    texture::CapturedTexture value{};
+    value.resourceId = resourceId;
+    value.generation = 1;
+    value.dimension = texture::TextureDimension::Texture2D;
+    value.width = 1;
+    value.height = 1;
+    value.depth = 1;
+    value.arrayLayers = 1;
+    value.mipLevels = 1;
+    value.resourceFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    value.viewFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    value.residentBaseMip = 0;
+    value.residentMipCount = 1;
+    texture::TextureSubresource level{};
+    level.width = 1;
+    level.height = 1;
+    level.rowPitch = 4;
+    level.slicePitch = 4;
+    level.bytes = {std::byte{red}, std::byte{green}, std::byte{blue},
+        std::byte{255}};
+    value.subresources.push_back(std::move(level));
+    return value;
+}
+
+// How many pixels the oracle painted a given hue, and how many of those the
+// device agreed on. Counting whole regions rather than probing a coordinate
+// keeps the assertion independent of exactly where the projection lands each
+// triangle.
+struct HueAgreement
+{
+    std::uint64_t expectedPixels{};
+    std::uint64_t agreeingPixels{};
+};
+
+enum class LibraryHue
+{
+    Red,
+    Blue,
+    Neither,
+};
+
+LibraryHue ClassifyHue(const raster::Rgba8 pixel)
+{
+    constexpr int kMargin = 48;
+    const auto red = static_cast<int>(pixel.r);
+    const auto blue = static_cast<int>(pixel.b);
+    if (red - blue >= kMargin) return LibraryHue::Red;
+    if (blue - red >= kMargin) return LibraryHue::Blue;
+    return LibraryHue::Neither;
+}
+
+HueAgreement MeasureHue(
+    const raster::RasterImage& expected,
+    const raster::RasterImage& actual,
+    const LibraryHue hue)
+{
+    HueAgreement agreement{};
+    if (expected.pixels.size() != actual.pixels.size()) return agreement;
+    for (std::size_t index = 0; index < expected.pixels.size(); ++index) {
+        if (ClassifyHue(expected.pixels[index]) != hue) continue;
+        ++agreement.expectedPixels;
+        if (ClassifyHue(actual.pixels[index]) == hue) {
+            ++agreement.agreeingPixels;
+        }
+    }
+    return agreement;
+}
+
+// Renders the phase 11 scene fixture with each visible object's material
+// naming a different entry of the frame's texture library, and compares
+// against the CPU oracle that resolves the same per-material index.
+//
+// This runs through the scene path rather than the phase 6 mesh path on
+// purpose: the per-material index travels in the scene push constants, so the
+// mesh path could not carry it, and the scene path is the one the mirrored
+// live frame takes.
+//
+// The fixture's vertex colours and material base colours are flattened to
+// white first. They would otherwise modulate the sampled texel, and a
+// contract that says "this pixel is red" is only worth reading if the texture
+// is the sole reason it is.
+int RenderTextureLibrary(const FamilyRenderOptions& options)
+{
+    view::FramePacket frame;
+    std::vector<std::byte> frameBytes;
+    raster::DecodedPacket source;
+    std::vector<std::byte> packetBytes;
+    scene::ScenePacket sceneSource;
+    std::vector<std::byte> sceneBytes;
+    if (!BuildSceneFrame(options.width, options.height, false,
+            frame, frameBytes) ||
+        !BuildSceneSource(options.width, options.height,
+            source, packetBytes) ||
+        !BuildSceneObjects(sceneSource)) {
+        std::cerr << "texlib-replay: fixture construction failed\n";
+        return 5;
+    }
+
+    for (auto& vertex : source.vertices) {
+        vertex.color[0] = 1.0f;
+        vertex.color[1] = 1.0f;
+        vertex.color[2] = 1.0f;
+    }
+    for (auto& material : source.materials) {
+        material.baseColor[0] = 1.0f;
+        material.baseColor[1] = 1.0f;
+        material.baseColor[2] = 1.0f;
+        material.baseColor[3] = 1.0f;
+    }
+    // Objects 0 and 2 are the two the fixture leaves visible, and they take
+    // different entries. Object 1 is fully occluded and keeps the sentinel,
+    // which is the same "no library entry" state every frame built before the
+    // library existed carries.
+    if (source.materials.size() < kSceneObjectCount) {
+        std::cerr << "texlib-replay: fixture material count changed\n";
+        return 5;
+    }
+    source.materials[0].textureIndex = 0;
+    source.materials[2].textureIndex = 1;
+    packetBytes.clear();
+    if (!raster::EncodePacket(source, packetBytes)) {
+        std::cerr << "texlib-replay: packet encode failed\n";
+        return 5;
+    }
+    if (scene::EncodeScenePacket(sceneSource, sceneBytes) !=
+        scene::ScenePacketError::None) {
+        std::cerr << "texlib-replay: scene encode failed\n";
+        return 5;
+    }
+    scene::SceneCoverage coverage{};
+    const auto accounting = scene::ValidateSceneAgainstFrame(
+        sceneSource, frame, coverage);
+    if (accounting != scene::ScenePacketError::None ||
+        !coverage.MirrorEligible()) {
+        std::cerr << "texlib-replay: pass accounting rejected the fixture: "
+                  << scene::ToString(accounting) << '\n';
+        return 5;
+    }
+
+    const std::array<texture::CapturedTexture, 2> library{
+        MakeFlatLibraryTexture(0x9000'0000'0000'00A1ull, 255, 0, 0),
+        MakeFlatLibraryTexture(0x9000'0000'0000'00A2ull, 0, 0, 255),
+    };
+    std::vector<std::byte> libraryBytes;
+    if (texture::EncodeTextureLibrary(library, libraryBytes) !=
+        texture::TexturePacketError::None) {
+        std::cerr << "texlib-replay: library encode failed\n";
+        return 5;
+    }
+
+    raster::DecodedPacket projected;
+    raster::RasterImage expected;
+    if (scene::ProjectScenePacket(source, frame.views.front(), sceneSource,
+            projected) != scene::ScenePacketError::None ||
+        raster::RenderReferenceTextureLibrary(projected, library, expected) !=
+            raster::ReferenceRasterError::None) {
+        std::cerr << "texlib-replay: reference render failed\n";
+        return 5;
+    }
+
+    abi::AdapterLuid luid{};
+    if (!QueryDefaultAdapterLuid(luid)) {
+        std::cerr << "texlib-replay: D3D adapter query failed\n";
+        return 5;
+    }
+    WindowsBackendModule module{options.backend};
+    BackendHost host;
+    abi::HostCallbacksV1 callbacks{};
+    callbacks.structSize = sizeof(callbacks);
+    callbacks.log = BackendLog;
+    const auto loaded = host.Load(module, callbacks);
+    if (!loaded || !host.RasterAvailable()) {
+        std::cerr << "texlib-replay: backend load failed host="
+                  << static_cast<unsigned>(loaded.error)
+                  << " backend=" << static_cast<unsigned>(loaded.backendResult)
+                  << " win32=" << module.LastErrorCode() << '\n';
+        return 6;
+    }
+    abi::RasterCreateRequestV1 create{};
+    create.structSize = sizeof(create);
+    create.flags = abi::RasterCreateAnyAdapter |
+        (options.validation ? abi::RasterCreateValidation : 0u);
+    create.adapterLuid = luid;
+    abi::RasterStatusV1 status{};
+    status.structSize = sizeof(status);
+    if (!host.CreateRaster(create, status)) {
+        std::cerr << "texlib-replay: create failed diagnostic="
+                  << status.diagnostic << '\n';
+        return 7;
+    }
+
+    SceneSubmission supplied;
+    const auto submitted = SubmitScene(host, packetBytes, frameBytes,
+        &sceneBytes, options.width, options.height, false, supplied,
+        &libraryBytes);
+    if (!submitted) {
+        std::cerr << "texlib-replay: submission failed diagnostic="
+                  << supplied.status.diagnostic << '\n';
+    }
+
+    // The same frame with the library withheld. Every material still names an
+    // entry, so a backend that ignored the library entirely would produce the
+    // same image twice -- and that is the failure this whole step exists to
+    // rule out.
+    SceneSubmission withheld;
+    const auto withheldSubmitted = SubmitScene(host, packetBytes, frameBytes,
+        &sceneBytes, options.width, options.height, false, withheld);
+
+    const auto comparison = raster::CompareRaster(
+        expected.pixels, supplied.image.pixels);
+    const auto red = MeasureHue(expected, supplied.image, LibraryHue::Red);
+    const auto blue = MeasureHue(expected, supplied.image, LibraryHue::Blue);
+    const auto pixelCount = static_cast<std::uint64_t>(options.width) *
+        options.height;
+    const auto withheldComparison = withheldSubmitted
+        ? raster::CompareRaster(supplied.image.pixels, withheld.image.pixels)
+        : raster::RasterComparison{};
+
+    // Both regions must exist and both must be reproduced. One alone would
+    // pass on a device that sampled a single entry for the whole frame.
+    const auto redPass = red.expectedPixels > pixelCount / 64 &&
+        red.agreeingPixels == red.expectedPixels;
+    const auto bluePass = blue.expectedPixels > pixelCount / 256 &&
+        blue.agreeingPixels == blue.expectedPixels;
+    const auto matched = comparison.Within(8, 0.5, pixelCount / 10);
+    const auto libraryMattered = withheldSubmitted &&
+        withheldComparison.differingPixels > pixelCount / 64;
+
+    status = {};
+    status.structSize = sizeof(status);
+    const auto destroyed = host.DestroyRaster(status);
+    const auto shutdown = host.RequestShutdown();
+    const auto lifecyclePass = destroyed && status.validationErrorCount == 0 &&
+        shutdown.error == BackendHostError::ShutdownDeferred;
+
+    const auto passed = submitted && matched && redPass && bluePass &&
+        libraryMattered && lifecyclePass &&
+        supplied.status.validationErrorCount == 0 &&
+        withheld.status.validationErrorCount == 0;
+    if (!supplied.image.pixels.empty()) {
+        static_cast<void>(WritePpm(options.output, supplied.image));
+    }
+    std::cout << "texlib-replay extent=" << options.width << 'x'
+              << options.height
+              << " library=" << library.size()
+              << " differing=" << comparison.differingPixels
+              << " max-error=" << comparison.maximumChannelError
+              << " mean-error=" << comparison.meanAbsoluteError
+              << " red=" << red.agreeingPixels << '/' << red.expectedPixels
+              << " blue=" << blue.agreeingPixels << '/' << blue.expectedPixels
+              << " withheld-differing=" << withheldComparison.differingPixels
+              << " validation-errors=" << supplied.status.validationErrorCount
+              << " lifecycle=" << (lifecyclePass ? "pass" : "fail")
+              << " result=" << (passed ? "pass" : "fail") << '\n';
+    return passed ? 0 : 9;
+}
+
 int RenderMirrorScene(const FamilyRenderOptions& options)
 {
     view::FramePacket frame{};
@@ -7461,6 +7735,15 @@ int main(const int argc, const char* const* argv)
             return 2;
         }
         return RenderIndirectAccumulation(options);
+    }
+    if (argc >= 2 &&
+        std::string_view{argv[1]} == "--render-texture-library") {
+        FamilyRenderOptions options;
+        if (!ParseFamilyRenderOptions(argc, argv, 2, options)) {
+            PrintUsage();
+            return 2;
+        }
+        return RenderTextureLibrary(options);
     }
     if (argc >= 2 &&
         std::string_view{argv[1]} == "--render-mirror-scene") {
