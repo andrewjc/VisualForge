@@ -3360,3 +3360,62 @@ An identity is not a texture. Nothing has been read back from the GPU yet:
 step 4, the always-on residency tracker, has not been started, so
 `textureIndex` is still the sentinel on every material and the mirror still
 shades from base colour alone.
+
+## The texture library reaches the mirror's materials (2026-08-17)
+
+Steps 4-6 of the goal, and the done condition is met:
+
+```
+renderer-texlib: materials=1601 textured=1034 library=121 bytes=128967824
+  resident=1067 resident-bytes=467501424 rejected=2571 budget-dropped=0
+  unreadable=0
+```
+
+**1,034 of 1,601 materials in the mirrored scene carry a resolved
+`textureIndex`**, backed by a 121-entry library holding 129 MB of the engine's
+own pixel data, encoded through `EncodeTextureLibrary` and passed on
+`RasterFrameRequestV1::textureLibraryData`. No assembly rejection, no
+validation error, the mirror still renders, and the residency budget was never
+reached.
+
+`src/EngineTextureResidency.{h,cpp}` is the new always-on tracker -- the
+texture-side counterpart to `EngineMeshExtractor`. 1,067 textures resident at
+467 MB, 2,571 creations correctly rejected as non-material (render targets,
+scratch surfaces, non-BC formats), nothing unreadable.
+
+### Deliberate deviation from the plan, and why
+
+The goal said pixels "read back from the GPU". They are taken from the
+engine's own upload at `CreateTexture2D` instead. Fallout 4 creates its
+material textures immutable with contents supplied up front, so the bytes are
+already in hand at that moment; a readback would mean a staging copy and a map
+on the render thread, synchronising the GPU inside the engine's own
+submission. `EngineMeshExtractor` moved its reads to Present for exactly that
+reason, and a texture that arrives with its data needs no such trade. The
+pixels are the engine's real texture contents either way.
+
+### A bug that would have made all of this silently find nothing
+
+The draw path keyed textures on the raw `ID3D11Resource*` from
+`GetResource`, while the residency tracker sees an `ID3D11Texture2D*` at
+creation. COM guarantees only that *IUnknown* is identical across an object's
+interfaces -- the two pointers need not be the same address. The existing
+one-shot capture already did the `QueryInterface(IUnknown)` reduction; the new
+code did not. Both now do. This was caught by reading the existing module's
+`Identity` helper before building on top of it, not by a failing test: the
+symptom would have been a lookup that finds nothing, forever, with every
+counter looking healthy.
+
+### What is measured and what is not
+
+`textured=1034` of `materials=1601` is 65%. The remainder split between
+materials whose draws never resolved a texture and those whose texture was not
+resident. Nothing here is guessed: a material without a resolved texture keeps
+the sentinel and shades from base colour.
+
+The Vulkan backend still does not *consume* the library -- it binds one
+material bundle for the whole frame, `GenerateRasterShaderLayout.cmake` still
+gates on a single combined-image-sampler, and `phase11/scene.frag` still
+declares a scalar `baseTexture`. That was explicitly out of scope for this
+goal, which ends at "the CPU has a correct, encoded texture library and knows
+which material wants which entry". It does.

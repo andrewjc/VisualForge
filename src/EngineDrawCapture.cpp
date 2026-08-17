@@ -568,11 +568,23 @@ void DescribeShader(
             ID3D11Resource* resource = nullptr;
             static_cast<ID3D11ShaderResourceView*>(view)->GetResource(&resource);
             if (resource == nullptr) return 0;
-            const auto identity = reinterpret_cast<std::uintptr_t>(resource);
+            // Through IUnknown, not the ID3D11Resource pointer itself. COM
+            // only guarantees that *IUnknown* is identical for a given object
+            // across interfaces; a texture reached as ID3D11Resource here and
+            // as ID3D11Texture2D at creation may be two different addresses.
+            // The residency tracker keys on the same canonical identity, and
+            // without this the two tables would never agree on a single
+            // texture -- a lookup that silently finds nothing, forever.
+            IUnknown* canonical = nullptr;
+            const auto queried = resource->QueryInterface(
+                __uuidof(IUnknown), reinterpret_cast<void**>(&canonical));
+            resource->Release();
+            if (FAILED(queried) || canonical == nullptr) return 0;
+            const auto identity = reinterpret_cast<std::uintptr_t>(canonical);
             // Released immediately: the pointer is used as an identity, not
             // as a reference. Holding it would keep engine textures alive
             // past the engine's own idea of their lifetime.
-            resource->Release();
+            canonical->Release();
             std::uintptr_t expected = 0;
             if (entry.view.compare_exchange_strong(expected, key,
                     std::memory_order_acq_rel)) {

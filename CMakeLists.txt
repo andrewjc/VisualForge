@@ -702,6 +702,7 @@ add_library(VisualForge SHARED
     src/EngineMeshExtractor.cpp
     src/EngineMeshCapture.cpp
     src/EngineTextureCapture.cpp
+    src/EngineTextureResidency.cpp
     src/Log.cpp
     src/Config.cpp
     src/CrashLog.cpp

@@ -1,5 +1,6 @@
 #include "EngineTextureCapture.h"
 #include "EngineDrawCapture.h"
+#include "EngineTextureResidency.h"
 
 #include "Config.h"
 #include "Log.h"
@@ -504,6 +505,12 @@ HRESULT STDMETHODCALLTYPE HookedCreateTexture2D(
         SnapshotCandidate(*description, initialData, snapshot);
     const auto result = s_state.createTexture2D(
         device, description, initialData, texture);
+    // Always on, and before this module's own one-shot logic: the mirror
+    // needs every material texture for the whole run, not one of them once.
+    if (SUCCEEDED(result) && texture != nullptr) {
+        vf::engine_texture_residency::NoteCreatedTexture(
+            description, initialData, *texture);
+    }
     if (wantsSnapshot && SUCCEEDED(result) && texture != nullptr &&
         *texture != nullptr) {
         snapshot.identity = Identity(*texture);

@@ -4,6 +4,7 @@
 #include "EngineCameraCapture.h"
 #include "EngineDrawCapture.h"
 #include "renderer_core/EngineEnvironmentSource.h"
+#include "EngineTextureResidency.h"
 #include "EngineMeshExtractor.h"
 #include "Log.h"
 #include "renderer_api/BackendAbi.h"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -363,6 +365,13 @@ constexpr std::uint64_t kMirrorSunLightId = 0x53554E0000000001ull;
 // pass is switched off. Lighting the scene from a stale sample would be worse
 // than not lighting it.
 std::vector<std::byte> s_mirrorLight;
+// The frame's texture library and the map from a scene object to the engine
+// texture its draws sampled. Objects outlive a single draw, so the identity is
+// keyed by the mesh identity the object was built from.
+std::vector<std::byte> s_mirrorTextureLibrary;
+std::unordered_map<std::uint64_t, std::uint64_t> s_mirrorObjectTextures;
+std::uint32_t s_mirrorLibraryTextures = 0;
+std::uint32_t s_mirrorTexturedMaterials = 0;
 environment::EnvironmentSourceError s_mirrorLightError =
     environment::EnvironmentSourceError::NoCandidate;
 // Logged on change rather than once. The first attempt happens during the
@@ -538,8 +547,18 @@ bool BuildLiveSceneGeometry(
     // about whether the objects actually drawn here have one.
     {
         std::uint64_t withTexture = 0;
+        // Keyed by mesh identity, which is what an object is built from: many
+        // draws collapse into one object, and they agree on the texture
+        // whenever they are the same mesh drawn more than once. The first
+        // draw to name a texture wins, so a later instance that happened to
+        // be recorded without one cannot erase it.
+        s_mirrorObjectTextures.clear();
         for (std::size_t index = 0; index < count; ++index) {
-            if (recorded[index].baseColorTexture != 0) ++withTexture;
+            const auto& draw = recorded[index];
+            if (draw.baseColorTexture == 0) continue;
+            ++withTexture;
+            s_mirrorObjectTextures.emplace(
+                drawstream::MeshIdentity(draw), draw.baseColorTexture);
         }
         static std::uint64_t s_lastWithTexture = 0xFFFF'FFFF'FFFF'FFFFull;
         if (withTexture != s_lastWithTexture) {
@@ -705,6 +724,69 @@ bool BuildLiveSceneGeometry(
             lastOffered = offered;
         }
         return false;
+    }
+
+    // The frame's texture library, and each material's index into it.
+    //
+    // AssembleSceneGeometry emits exactly one material per surviving object,
+    // in object order, which is what lets the two be matched up here without
+    // threading a resolver through the assembler itself.
+    s_mirrorTextureLibrary.clear();
+    s_mirrorLibraryTextures = 0;
+    s_mirrorTexturedMaterials = 0;
+    {
+        std::vector<texture::CapturedTexture> library;
+        std::unordered_map<std::uint64_t, std::uint32_t> indexOf;
+        const auto materialCount = std::min(
+            rasterPacket.materials.size(), scenePacket.objects.size());
+        for (std::size_t index = 0; index < materialCount; ++index) {
+            const auto found =
+                s_mirrorObjectTextures.find(scenePacket.objects[index].objectId);
+            if (found == s_mirrorObjectTextures.end() || found->second == 0) {
+                continue;
+            }
+            auto existing = indexOf.find(found->second);
+            if (existing == indexOf.end()) {
+                const auto* const resident =
+                    engine_texture_residency::Find(found->second);
+                // Resident is not guaranteed: the engine streams textures in
+                // and the budget is finite. A material whose texture is not
+                // held keeps the sentinel and shades from base colour, which
+                // is a partially textured frame rather than a wrong one.
+                if (resident == nullptr) continue;
+                existing = indexOf.emplace(found->second,
+                    static_cast<std::uint32_t>(library.size())).first;
+                library.push_back(*resident);
+            }
+            rasterPacket.materials[index].textureIndex = existing->second;
+            ++s_mirrorTexturedMaterials;
+        }
+        if (!library.empty()) {
+            s_mirrorLibraryTextures = static_cast<std::uint32_t>(library.size());
+            if (texture::EncodeTextureLibrary(library, s_mirrorTextureLibrary) !=
+                texture::TexturePacketError::None) {
+                s_mirrorTextureLibrary.clear();
+                s_mirrorLibraryTextures = 0;
+                s_mirrorTexturedMaterials = 0;
+            }
+        }
+    }
+
+    {
+        const auto residency = engine_texture_residency::Counters();
+        static std::uint32_t lastTextured = 0xFFFF'FFFFu;
+        if (s_mirrorTexturedMaterials != lastTextured) {
+            log::Write("renderer-texlib: materials=%zu textured=%u "
+                "library=%u bytes=%zu resident=%u resident-bytes=%llu "
+                "rejected=%u budget-dropped=%u unreadable=%u",
+                rasterPacket.materials.size(), s_mirrorTexturedMaterials,
+                s_mirrorLibraryTextures, s_mirrorTextureLibrary.size(),
+                residency.resident,
+                static_cast<unsigned long long>(residency.residentBytes),
+                residency.rejected, residency.budgetDropped,
+                residency.unreadable);
+            lastTextured = s_mirrorTexturedMaterials;
+        }
     }
 
     rasterPacket.header.width = width;
@@ -1588,6 +1670,11 @@ bool CompositeMirror(
         request.lightData = reinterpret_cast<std::uint64_t>(
             s_mirrorLight.data());
         request.lightSize = s_mirrorLight.size();
+    }
+    if (!s_mirrorTextureLibrary.empty()) {
+        request.textureLibraryData = reinterpret_cast<std::uint64_t>(
+            s_mirrorTextureLibrary.data());
+        request.textureLibrarySize = s_mirrorTextureLibrary.size();
     }
     request.packetData = reinterpret_cast<std::uint64_t>(
         s_mirrorPacket.data());
