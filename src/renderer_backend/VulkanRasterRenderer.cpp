@@ -1,6 +1,8 @@
 #include "renderer_backend/VulkanRasterRenderer.h"
 
 #include "renderer_api/RasterPacket.h"
+
+#include <chrono>
 #include "renderer_core/EngineDeformation.h"
 #include "renderer_core/EngineIndirect.h"
 #include "renderer_core/EnginePostChain.h"
@@ -539,6 +541,16 @@ struct VulkanRasterRenderer::Impl
     // carries is the index into this.
     std::vector<SampledResource> materialTextures;
     std::uint64_t materialTextureSignature{};
+    // Where a frame's time goes inside the backend. `record` covers everything
+    // this thread does to build and submit the frame, and contains
+    // `acceleration`; `gpuWait` is the fence, so it is what the device
+    // actually spent executing; `copy` is the readback. Reported together
+    // because the fix for each is different and the total names none of them.
+    std::uint64_t frameRecordUs{};
+    std::uint64_t frameAccelerationUs{};
+    std::uint64_t frameGpuWaitUs{};
+    std::uint64_t frameCopyUs{};
+    std::uint64_t frameTimedCount{};
     material::MaterialReplayBundle materialBundle;
     material::MaterialGpuRecords materialRecords;
     view::ViewRecordV1 viewRecord;
@@ -4447,11 +4459,15 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     if (result != abi::Result::Success) {
         return result;
     }
-    // Built here, after the upload buffer exists and holds this frame's
+    // Built here, after the upload buffer exists and holds this frame.s
     // geometry. Building earlier would take the device address of a buffer
     // that has not been created yet, let alone filled.
     {
+        const auto accelerationStarted = std::chrono::steady_clock::now();
         const auto built = BuildAccelerationStructures(packet, layout);
+        frameAccelerationUs += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - accelerationStarted).count());
         if (built != abi::Result::Success) return built;
     }
     if (vkResetFences(device, 1, &completion) != VK_SUCCESS ||
@@ -5539,7 +5555,11 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
         return abi::Result::RasterRenderFailed;
     }
     fenceSubmitted = true;
+    const auto gpuStarted = std::chrono::steady_clock::now();
     result = WaitForSubmission();
+    frameGpuWaitUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - gpuStarted).count());
     if (result != abi::Result::Success) {
         return result;
     }
@@ -6468,10 +6488,18 @@ abi::Result VulkanRasterRenderer::Render(
         result = impl_->PrepareIndirect(request);
     }
     if (result == abi::Result::Success) {
+        const auto recordStarted = std::chrono::steady_clock::now();
         result = impl_->RecordAndSubmit(packet, uploadLayout);
+        impl_->frameRecordUs += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - recordStarted).count());
     }
     if (result == abi::Result::Success) {
+        const auto copyStarted = std::chrono::steady_clock::now();
         result = impl_->CopyOutput(request, packet);
+        impl_->frameCopyUs += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - copyStarted).count());
     }
     if (result == abi::Result::Success && hasGBufferOutput) {
         result = impl_->CopySceneOutput(request);
@@ -6484,6 +6512,23 @@ abi::Result VulkanRasterRenderer::Render(
     }
     if (result == abi::Result::Success) {
         result = impl_->CopyIndirectResults(request);
+    }
+    if (result == abi::Result::Success) {
+        ++impl_->frameTimedCount;
+        if (impl_->frameTimedCount % 120 == 0 &&
+            impl_->callbacks.log != nullptr) {
+            const auto frames = impl_->frameTimedCount;
+            std::string message{"frame timing record-us="};
+            message += std::to_string(impl_->frameRecordUs / frames);
+            message += " acceleration-us=";
+            message += std::to_string(impl_->frameAccelerationUs / frames);
+            message += " gpu-wait-us=";
+            message += std::to_string(impl_->frameGpuWaitUs / frames);
+            message += " readback-us=";
+            message += std::to_string(impl_->frameCopyUs / frames);
+            impl_->callbacks.log(
+                impl_->callbacks.userData, 1u, message.c_str());
+        }
     }
     impl_->FillStatus(status, result,
         result == abi::Result::Success ? "rendered" : "raster frame failed");
