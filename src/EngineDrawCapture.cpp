@@ -229,6 +229,24 @@ std::atomic<std::uint64_t> s_psResourceNotices{};
 std::atomic<std::uint64_t> s_drawsWithBaseColor{};
 std::atomic<std::uint64_t> s_drawsMissingBaseColor{};
 std::atomic<std::uint64_t> s_drawsNoShader{};
+// `t_currentPixelShader == 0` has two causes that call for opposite responses,
+// and counting them as one is what has made this population look like a single
+// 36% defect.
+//
+// The engine binds a null pixel shader for every depth-only pass -- the depth
+// prepass and each shadow cascade -- and those draws correctly have no albedo
+// to find. A thread that has never had a PSSetShader observed at all is the
+// other thing entirely: state this module never saw, and the only one of the
+// two that is a capture gap.
+thread_local bool t_pixelShaderEverSet = false;
+std::atomic<std::uint64_t> s_drawsShaderExplicitNull{};
+std::atomic<std::uint64_t> s_drawsShaderNeverSet{};
+// Of the explicit nulls, how many ran with the main scene depth bound. A depth
+// prepass writes the scene depth; a shadow cascade writes its own map. The
+// split says which of the two the population actually is, rather than leaving
+// "depth-only" as one word covering both.
+std::atomic<std::uint64_t> s_drawsNullSceneDepth{};
+std::atomic<std::uint64_t> s_drawsNullOtherTarget{};
 std::atomic<std::uint64_t> s_drawsShaderUnknown{};
 std::atomic<std::uint64_t> s_drawsShaderNoBase{};
 std::atomic<std::uint64_t> s_drawsConventionBaseColor{};
@@ -614,6 +632,17 @@ void DescribeShader(
     // correct and expected. Only the third is a defect.
     if (t_currentPixelShader == 0) {
         s_drawsNoShader.fetch_add(1, std::memory_order_relaxed);
+        if (t_pixelShaderEverSet) {
+            // The engine asked for no pixel shader. Depth-only by construction.
+            s_drawsShaderExplicitNull.fetch_add(1, std::memory_order_relaxed);
+            if (depth::SceneDepthBound()) {
+                s_drawsNullSceneDepth.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                s_drawsNullOtherTarget.fetch_add(1, std::memory_order_relaxed);
+            }
+        } else {
+            s_drawsShaderNeverSet.fetch_add(1, std::memory_order_relaxed);
+        }
         return 0;
     }
     auto slot = FindShaderBaseColorSlot(t_currentPixelShader);
@@ -1146,6 +1175,9 @@ void __stdcall HookedSetPixelShader(
     const UINT instanceCount) noexcept
 {
     t_currentPixelShader = reinterpret_cast<std::uintptr_t>(shader);
+    // Set even when the shader is null, which is what separates "the engine
+    // bound nothing" from "this thread was never observed binding anything".
+    t_pixelShaderEverSet = true;
     s_psShaderBinds.fetch_add(1, std::memory_order_relaxed);
     s_origSetPixelShader(self, shader, instances, instanceCount);
 }
@@ -1333,6 +1365,14 @@ ConstantStats ConstantCounters() noexcept
     stats.drawsWithBaseColor = s_drawsWithBaseColor.load(std::memory_order_relaxed);
     stats.drawsMissingBaseColor = s_drawsMissingBaseColor.load(std::memory_order_relaxed);
     stats.drawsNoShader = s_drawsNoShader.load(std::memory_order_relaxed);
+    stats.drawsShaderExplicitNull =
+        s_drawsShaderExplicitNull.load(std::memory_order_relaxed);
+    stats.drawsShaderNeverSet =
+        s_drawsShaderNeverSet.load(std::memory_order_relaxed);
+    stats.drawsNullSceneDepth =
+        s_drawsNullSceneDepth.load(std::memory_order_relaxed);
+    stats.drawsNullOtherTarget =
+        s_drawsNullOtherTarget.load(std::memory_order_relaxed);
     stats.drawsShaderUnknown = s_drawsShaderUnknown.load(std::memory_order_relaxed);
     stats.drawsShaderNoBase = s_drawsShaderNoBase.load(std::memory_order_relaxed);
     stats.drawsConventionBaseColor = s_drawsConventionBaseColor.load(std::memory_order_relaxed);

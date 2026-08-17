@@ -302,6 +302,12 @@ struct ConstantStats
     // carried no reflection chunk to read; one present but without a material
     // texture is a post or volumetric pass.
     std::uint64_t drawsNoShader{};
+    // The two halves of drawsNoShader. Only drawsShaderNeverSet is a capture
+    // gap; the explicit nulls are the engine.s depth-only passes.
+    std::uint64_t drawsShaderExplicitNull{};
+    std::uint64_t drawsShaderNeverSet{};
+    std::uint64_t drawsNullSceneDepth{};
+    std::uint64_t drawsNullOtherTarget{};
     std::uint64_t drawsShaderUnknown{};
     std::uint64_t drawsShaderNoBase{};
     // Draws textured from register 0 by Bethesda's convention because their

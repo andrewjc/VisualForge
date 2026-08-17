@@ -1079,6 +1079,20 @@ bool BuildLiveSceneGeometry(
             static_cast<unsigned long long>(constants.drawsShaderNoBase),
             static_cast<unsigned long long>(constants.drawsConventionBaseColor),
             static_cast<unsigned long long>(constants.psShaderBinds));
+        // The 36% `no-shader` population, split by cause. Reported separately
+        // because the two halves call for opposite responses and one number
+        // could not tell them apart: `explicit-null` is the engine binding no
+        // pixel shader for a depth-only pass, which correctly has no albedo,
+        // while `never-set` is a thread whose state this module never observed
+        // and is the only half that is a defect. The scene-depth split then
+        // says whether the nulls are the depth prepass or the shadow cascades.
+        log::Write("renderer-basecolor-null: no-shader=%llu explicit-null=%llu "
+            "never-set=%llu null-scene-depth=%llu null-other-target=%llu",
+            static_cast<unsigned long long>(constants.drawsNoShader),
+            static_cast<unsigned long long>(constants.drawsShaderExplicitNull),
+            static_cast<unsigned long long>(constants.drawsShaderNeverSet),
+            static_cast<unsigned long long>(constants.drawsNullSceneDepth),
+            static_cast<unsigned long long>(constants.drawsNullOtherTarget));
         // Every pixel-shader constant buffer the engine bound, by size and by
         // how often it was rewritten. A per-frame block is written once a
         // frame; a per-draw block is written thousands of times. That ratio is
