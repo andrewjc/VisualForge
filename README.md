@@ -1,100 +1,124 @@
 # VisualForge
 
-A single F4SE plugin for Fallout 4 (runtime **1.11.221**, F4SE **0.7.8**) that gives you
-a live, in-game control panel over the engine's rendering settings, plus a post-process
-sharpening pass — so visual tuning happens in real time instead of by editing INIs and
-relaunching. Built to be extended toward deeper engine modernization (see Roadmap).
+An F4SE plugin that gives Fallout 4 a live in-game rendering control panel, a
+post-process grading and sharpening pass, and — as ongoing work — a Vulkan
+renderer built to run alongside the engine's own D3D11 one.
+
+![runtime](https://img.shields.io/badge/Fallout%204-1.11.221-blue)
+![f4se](https://img.shields.io/badge/F4SE-0.7.8-blue)
+![toolchain](https://img.shields.io/badge/MSVC%202022-C%2B%2B20-blue)
+![graphics](https://img.shields.io/badge/Vulkan-SDK%20required-blue)
+
+Two things live in this repository. The **plugin** is finished and usable: an
+overlay that binds every INI-backed engine setting by name with no hardcoded
+addresses, a colour-grading and sharpening pass, a crash reporter, and a
+weapon-debris crash fix. The **Vulkan renderer** is in progress — it mirrors the
+live scene into a second, independently rendered frame so its output can be
+compared against the engine's, phase by phase, against a CPU reference.
 
 Toggle the overlay with **F10**.
 
-The overlay opens in **Basic** mode — a short list of one-click "wrap-up" controls (a Visual
-Quality preset, a Look/color preset, and simple Brightness/Vividness/Sharpness sliders) that
-each configure many low-level settings at once. A **Basic / Advanced** switch at the top flips
-to the full tabbed UI below for per-setting control. The choice is remembered
-(`[Overlay] bBasicMode`).
+## Quick start
 
-## What it does today
+Requires Visual Studio 2022 (MSVC), CMake, and the
+[Vulkan SDK](https://vulkan.lunarg.com/) with `VULKAN_SDK` set — the build
+compiles shaders with `glslc` and links against `Vulkan::Vulkan`.
 
-- **Live engine-setting binder.** On the first rendered frame it scans the running
-  executable and binds every INI-backed engine `Setting` object by name — **2132 of 2282**
-  catalog entries on 1.11.221 — with *no hardcoded addresses*. Editing a value in the
-  overlay writes directly into the engine's live memory.
-- **Quick Tweaks tab.** Curated sliders/toggles for shadows, TAA & sharpness, godrays,
-  ambient occlusion, grass/LOD/terrain, and image-space effects, each with sane ranges
-  and tooltips.
-- **Browser tab.** Filterable list of all 2282 known settings; edit any resolved one.
-- **Color & Sharpen tab.** A real-time grading pass — exposure, contrast, saturation, vibrance,
-  white balance (temperature/tint), an optional ACES-approx filmic tonemap, and a **cinematic
-  3D LUT loader** (`.cube` files) — plus AMD FidelityFX Contrast Adaptive Sharpening, all applied
-  to the final frame in a single pass. Drop `.cube` files in `Data\F4SE\Plugins\LUTs\`; four
-  examples ship (Neutral_Identity, Warm_Cinematic, Cool_Wasteland, Filmic_Contrast).
-- **Systems tab.** Weapon-debris crash fix (guards the `CreateShaderResourceView` failure that
-  crashes NVIDIA Flex debris on 10-series+ GPUs) with a control to re-enable `bNVFlexEnable`,
-  plus **scene depth capture** status and a depth debug view.
-- **Panini projection** (ultrawide edge correction). Rectilinear projection stretches the
-  edges of a wide field of view; Panini trades that for gently curved horizontal lines while
-  keeping verticals straight. Two parts, because a projection *matrix* mathematically cannot
-  express Panini (it is non-linear):
-  1. a screen-space remap of the finished frame, and
-  2. the engine-side change that makes it correct — the game is told to render at a **wider
-     FOV** so the warp has real pixels at the screen edge instead of smearing. The overlay
-     computes the required FOV and writes it to `[Display]` in `Fallout4Custom.ini`.
-  Caveats: the warp is applied after the UI is composited, so the **HUD warps with it**; and
-  the FOV change needs a restart. `[Panini] bEnablePanini` (default off).
+```powershell
+git clone --recurse-submodules <this-repo> VisualForge
+cd VisualForge
+cmake --preset vs2022-x64-release
+cmake --build --preset vs2022-x64-release
+copy out\build\vs2022-x64-release\Release\VisualForge.dll "<game>\Data\F4SE\Plugins\"
+```
+
+Launch through `f4se_loader.exe` in the game root. If you cloned without
+`--recurse-submodules`, run `git submodule update --init` first or the build
+will not configure.
+
+## What the plugin does
+
+- **Live engine-setting binder.** On the first rendered frame it scans the
+  running executable and binds INI-backed engine `Setting` objects by name —
+  **2207 of 2282** catalogue entries on 1.11.221 — with no hardcoded addresses.
+  Editing a value in the overlay writes straight into live memory.
+- **Basic and Advanced modes.** Basic is a short list of one-click presets
+  (visual quality, look, brightness/vividness/sharpness). Advanced is the full
+  tabbed UI. The choice persists in `[Overlay] bBasicMode`.
+- **Quick Tweaks.** Curated controls for shadows, TAA and sharpness, godrays,
+  ambient occlusion, grass, LOD, terrain, and image-space effects.
+- **Browser.** Filterable list of all 2282 known settings.
+- **Colour and Sharpen.** A real-time grading pass — exposure, contrast,
+  saturation, vibrance, white balance, optional ACES-approximate filmic
+  tonemap, and a `.cube` 3D LUT loader — plus AMD FidelityFX Contrast Adaptive
+  Sharpening, applied to the final frame in one pass. Drop `.cube` files in
+  `Data\F4SE\Plugins\LUTs\`; four ship as examples.
+- **Weapon-debris crash fix.** Guards the `CreateShaderResourceView` failure
+  that crashes NVIDIA Flex debris on 10-series and later GPUs, with a control
+  to re-enable `bNVFlexEnable`.
+- **Panini projection** for ultrawide edge correction: a screen-space remap of
+  the finished frame, plus the wider render FOV that gives the warp real pixels
+  at the screen edge. A projection matrix cannot express Panini, because it is
+  non-linear. The HUD warps with it, and the FOV change needs a restart.
+  `[Panini] bEnablePanini`, default off.
 - **Crash reporting.** An unhandled-exception filter writes
-  `Documents\My Games\Fallout4\F4SE\VisualForge-crash.log` on a fault: exception type, the
-  **faulting module and offset**, the address an access violation touched, a full register
-  dump, a symbolised call stack (function names and source lines where a matching PDB is
-  available), and the loaded-module map. This exists because Buffout 4 cannot run on the
-  1.11.x runtime — it is built on CommonLibF4, which stops at 1.10.984, and F4SE treats
-  1.11.137+ as a different structure layout. Unlike Buffout this only *observes*: it never
-  replaces engine allocators, so it is runtime-version independent.
-- **Scene depth capture.** Watches every depth-stencil view the engine binds and keeps the
-  full-resolution one — the main scene depth — copying it each frame into a shader-readable
-  texture. This is the foundation screen-space GI/AO needs; on its own it changes nothing you
-  see. A one-shot self-test reads the depth back on the CPU and logs min/max/spread so the
-  capture can be verified from the log without touching the UI.
-- **Info tab.** FPS, GPU, resolution, a **"Write changes to game INIs"** button that
-  persists your session edits to `Fallout4Prefs.ini` / `Fallout4Custom.ini` (routing each
-  key to the file the engine actually reads it from), and a **Skip intro movies** toggle.
-- **Intro-movie skip.** At load (before the main menu is built) the plugin blanks
-  `sIntroSequence` — whose value is `GameIntro_V3_B.bk2`, the startup Bethesda/Vault-Tec
-  montage — and `sIntroMovie` in live memory, leaving the animated main-menu background and
-  the S.P.E.C.I.A.L. videos intact. Controlled by `[Startup] bSkipIntroMovies` (default on).
+  `Documents\My Games\Fallout4\F4SE\VisualForge-crash.log`: exception type,
+  faulting module and offset, the address an access violation touched, a
+  register dump, a symbolised call stack where a PDB is available, and the
+  module map. This exists because Buffout 4 cannot run on 1.11.x — it is built
+  on CommonLibF4, which stops at 1.10.984. Unlike Buffout, this only observes:
+  it never replaces engine allocators, so it is runtime-version independent.
+- **Scene depth capture.** Keeps the full-resolution depth-stencil view the
+  engine binds and copies it each frame into a shader-readable texture. On its
+  own it changes nothing you see; it is the foundation screen-space GI and AO
+  need.
+- **Intro-movie skip.** Blanks `sIntroSequence` and `sIntroMovie` in live memory
+  before the main menu is built, leaving the animated menu background and the
+  S.P.E.C.I.A.L. videos intact. `[Startup] bSkipIntroMovies`, default on.
+
+## The Vulkan renderer
+
+`docs/vulkan_renderer_implementation_plan.md` defines 27 phases, taken in
+order, each one red-green-refactor with mutation testing and verified in-engine
+before the next begins.
+
+The approach is a mirror rather than a replacement. The plugin captures the
+engine's draw stream, vertex layouts, camera and constant buffers, rebuilds the
+scene as pointer-free versioned packets, and renders it with Vulkan into a
+separate frame. Every phase is pinned by a CPU reference implementation that
+the GPU result is compared against, so a difference is attributable to one
+term rather than to the renderer as a whole.
+
+**Status.** Geometry, camera, terrain, alpha, material families, ray-traced
+shadows and reflections, diffuse GI with temporal accumulation, sorted
+transparency and decals, and the post chain are implemented and tested. The
+engine's directional light is now recovered from its own shader reflection and
+delivered to the backend. Per-draw texture binding is not done. The engine's
+own shaders ship with their reflection stripped, so material constants remain
+unnamed. `journal.md` carries the running record, including what is measured
+and what is still unattributed.
+
+Nothing here replaces the engine's renderer in normal play. The mirror is
+opt-in and driven by the capture harness.
 
 ## Layout
 
 ```
-VisualForge/
-  src/                 plugin source (see module list below)
-  external/            build dependencies (not checked in)
-    f4se/  common/     ianpatt F4SE 0.7.8 + common (built from master)
-    imgui/             Dear ImGui 1.91.8 (+ dx11/win32 backends)
-    minhook/           MinHook 1.3.4
-  CMakeLists.txt
-  build/               CMake build tree (build/Release/VisualForge.dll)
+src/
+  renderer_api/        ABI shared between plugin and backend
+  renderer_core/       packets, scene assembly, lighting, CPU reference
+  renderer_backend/    the Vulkan renderer (VisualForgeRenderer.dll)
+  renderer_host/       backend loading and lifecycle
+  renderer_trace/      capture tracing
+  tools/               replay and probe executables
+shaders/               GLSL, compiled to SPIR-V and embedded at build time
+tests/unit/            Catch2 suites
+tools/game_smoke/      live capture harness (PowerShell)
+docs/                  design, hook analysis, and per-phase records
+external/              dependencies (submodules and vendored sources)
 ```
 
-Modules: `main` (F4SE entry + version data), `Log`, `Config`, `PatternScan` (PE walk +
-.rdata checks), `EngineSettings` (the binder), `IniWriter`, `IntroSkip`, `PostProcess`
-(grading + CAS), `WeaponDebris` (crash fix), `D3D11Hook` (Present/ResizeBuffers hook +
-WndProc + ImGui lifecycle), `Overlay` (the UI), `SettingsCatalog.h` (generated list of every
-engine setting name). See `docs/EngineHooks.md` for the deep hook-surface analysis and roadmap.
-
-## Build & install
-
-```
-cmake -B build -S .
-cmake --build build --config Release
-copy build\Release\VisualForge.dll "..\Data\F4SE\Plugins\VisualForge.dll"
-```
-
-Requires VS 2022 + MSVC and CMake (both already on this machine). Launch the game with
-`f4se_loader.exe` in the game root.
-
-### Test-driven renderer build
-
-The renderer work uses the checked-in CMake presets and CTest/Catch2 suites:
+## Building and testing
 
 ```powershell
 cmake --preset vs2022-x64-debug
@@ -102,14 +126,24 @@ cmake --build --preset vs2022-x64-debug
 ctest --preset vs2022-x64-debug --output-on-failure
 ```
 
-Use `vs2022-x64-release` for the Release configuration. GPU, replay, game, soak, and
-performance labels are added as their implementation phases land; unit tests never launch
-Steam or Fallout. The full red–green–refactor sequence is documented in
-`docs/vulkan_renderer_implementation_plan.md`.
+`vs2022-x64-release` selects the Release configuration. **Run both.** A
+release-only crash at process exit once passed cleanly in debug and printed
+`result=pass` before dying; a test that reports success and then crashes is a
+failing test.
 
-## Config
+367 tests currently pass in both configurations. They carry labels — `unit`,
+`contract`, `gpu`, and `phaseNN` — so a phase can be run alone:
 
-`Data\F4SE\Plugins\VisualForge.ini` (created on first run):
+```powershell
+ctest --preset vs2022-x64-debug -L phase20
+```
+
+Unit tests never launch Steam or Fallout 4. GPU contract tests need a Vulkan
+device.
+
+## Configuration
+
+`Data\F4SE\Plugins\VisualForge.ini`, created on first run:
 
 ```ini
 [Overlay]
@@ -119,7 +153,7 @@ iToggleKey=121          ; virtual-key code; 121 = F10
 bSkipIntroMovies=1
 
 [Systems]
-bWeaponDebrisCrashFix=1 ; guard CreateShaderResourceView so Flex debris can't crash
+bWeaponDebrisCrashFix=1
 
 [Sharpen]
 bEnabled=0
@@ -134,44 +168,57 @@ fVibrance=0.0
 fTemperature=0.0
 fTint=0.0
 bFilmic=0
-bLut=0              ; enable the loaded 3D LUT
+bLut=0
 fLutIntensity=1.0
-sLutFile=           ; filename within Data\F4SE\Plugins\LUTs\
+sLutFile=               ; filename within Data\F4SE\Plugins\LUTs\
 ```
 
-## How the binder works (the interesting part)
+## How the binder works
 
-Bethesda's `Setting` objects have the layout `{ vtable*, Data(8 bytes), char* name }`.
-We:
-1. dump every setting name string the game ships (`SettingsCatalog.h`),
-2. locate those strings in the image's data sections,
-3. find every 8-byte-aligned pointer to one of those strings, treat the address 0x10
-   before it as a candidate `Setting`, and
-4. confirm the qword at offset 0 (the vtable pointer) lands in a read-only data section.
+Bethesda's `Setting` objects have the layout
+`{ vtable*, Data (8 bytes), char* name }`. The binder:
 
-That confirmation is what makes it address-independent and safe across game updates: no
-offset is ever hardcoded, so a new runtime version just needs the catalog regenerated
-(and usually not even that).
+1. dumps every setting name the game ships (`SettingsCatalog.h`),
+2. locates those strings in the image's data sections,
+3. finds every 8-byte-aligned pointer to one of them and treats the address
+   `0x10` before it as a candidate `Setting`, and
+4. confirms the qword at offset 0 — the vtable pointer — lands in a read-only
+   data section.
 
-## Binder coverage
+Step 4 is what makes it address-independent and safe across game updates: no
+offset is hardcoded, so a new runtime version usually needs nothing but a
+regenerated catalogue.
 
-**2207 of 2282** catalog entries resolve on 1.11.221. The remaining 75 split into ~37
-whose name string exists but has no static `Setting` object (dynamically registered) and
-~38 with no name string at all (console-command tokens, not real settings). An earlier
-build resolved only 2132: the linker packs some setting names directly after non-string
-data with no leading NUL, so the name is a *suffix* of the run ending at the terminator —
-Pass 1 now tests every name-length suffix ending at each NUL, which recovered 75 settings
-including `bVolumetricLightingEnable`.
+Of the 75 entries that do not resolve, roughly 37 have a name string but no
+static `Setting` object because they are registered dynamically, and roughly 38
+have no name string at all — they are console-command tokens rather than
+settings.
 
 ## Known gaps
 
-- Some settings are only read at area-load; the overlay notes these ("Applied on area
-  reload"). Changing them takes effect after a cell transition or save/load.
-- `sLocalSavePath` / `sStartingConsoleCommand` have a name string but no static object;
-  they aren't tunable at runtime (they're consumed once at startup).
+- Some settings are read only at area load. The overlay marks these; changes
+  take effect after a cell transition or a save/load.
+- `sLocalSavePath` and `sStartingConsoleCommand` have name strings but no
+  static object. They are consumed once at startup and are not tunable.
+- The Panini warp is applied after the UI is composited, so the HUD warps too.
 
-## Roadmap (all into this same plugin)
+## Roadmap
 
-NVFlex debris crash-fix wrapper (re-enable `bNVFlexEnable`), DLAA/DLSS via Streamline,
-godray grid/cascade patches beyond the INI ceiling, SSR ray-count patch, custom HLSL
-shader replacement, and HDR10 output.
+Finishing the 27 renderer phases is the main line of work. Alongside it:
+DLAA/DLSS through Streamline, godray grid and cascade patches beyond the INI
+ceiling, an SSR ray-count patch, custom HLSL shader replacement, and HDR10
+output.
+
+## Dependencies
+
+| Component | Source |
+| --- | --- |
+| F4SE 0.7.8 + common | [ianpatt/f4se](https://github.com/ianpatt/f4se), [ianpatt/common](https://github.com/ianpatt/common) (submodules) |
+| Catch2 v3.15.3 | [catchorg/Catch2](https://github.com/catchorg/Catch2) (submodule) |
+| Dear ImGui | vendored in `external/imgui` |
+| MinHook | vendored in `external/minhook` |
+
+## Licence
+
+No licence has been chosen yet, so default copyright applies and no permissions
+are granted. The bundled dependencies keep their own licences.
