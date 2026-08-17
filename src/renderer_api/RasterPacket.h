@@ -19,7 +19,11 @@ constexpr std::uint16_t kPacketTexCoordVersionMinor = 1;
 // will walk at thirty-two, which is not a decode failure but a scene of
 // garbage.
 constexpr std::uint16_t kPacketVertexNormalVersionMinor = 2;
-constexpr std::uint16_t kPacketVersionMinor = kPacketVertexNormalVersionMinor;
+// And a per-material texture index here. A record encoded under an older
+// number is 32 bytes; reading it as the new 48-byte layout walks the next
+// material's resourceId as if it were this one's textureIndex.
+constexpr std::uint16_t kPacketMaterialTextureVersionMinor = 3;
+constexpr std::uint16_t kPacketVersionMinor = kPacketMaterialTextureVersionMinor;
 constexpr std::uint32_t kMaximumExtent = 16384;
 
 enum class IndexType : std::uint32_t
@@ -162,11 +166,25 @@ struct alignas(16) RasterVertexV3
     RasterVertexV3(const RasterVertexV2& source) noexcept;
 };
 
+// No captured texture. Not zero: zero is the first real slot in the frame's
+// texture library, and a material that defaulted to it would silently sample
+// whatever texture happened to be uploaded first rather than shading from
+// baseColor alone -- which is exactly the wrong material for every mesh whose
+// texture capture is still filling in.
+inline constexpr std::uint32_t kNoMaterialTexture = 0xFFFF'FFFFu;
+
 struct alignas(16) RasterMaterialV1
 {
     std::uint64_t resourceId{};
     std::uint64_t shaderLayoutHash{kPhase6ShaderLayoutHash};
     float baseColor[4]{1.0f, 1.0f, 1.0f, 1.0f};
+    // Index into this frame's texture library (see EngineTexture's
+    // EncodeTextureLibrary), or kNoMaterialTexture.
+    std::uint32_t textureIndex{kNoMaterialTexture};
+    // Explicit rather than implicit tail padding. A record that reaches the
+    // wire must have every byte accounted for, or two builds could disagree
+    // about bytes neither of them names.
+    std::uint32_t reserved[3]{};
 };
 
 struct alignas(8) RasterDrawV1
@@ -305,7 +323,7 @@ static_assert(sizeof(RasterVertexV1) == 24);
 static_assert(sizeof(RasterVertexV2) == 32);
 static_assert(sizeof(RasterVertexV3) == 48);
 static_assert(alignof(RasterVertexV3) == 16);
-static_assert(sizeof(RasterMaterialV1) == 32);
+static_assert(sizeof(RasterMaterialV1) == 48);
 static_assert(sizeof(RasterDrawV1) == 32);
 
 }

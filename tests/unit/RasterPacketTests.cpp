@@ -211,9 +211,52 @@ TEST_CASE("phase6 frame graph declares upload raster tone-map readback", "[phase
 
 TEST_CASE("phase6 reflected material layout is fixed", "[phase6][raster]")
 {
-    CHECK(sizeof(RasterMaterialV1) == 32);
+    CHECK(sizeof(RasterMaterialV1) == 48);
     CHECK(offsetof(RasterMaterialV1, baseColor) == 16);
+    CHECK(offsetof(RasterMaterialV1, textureIndex) == 32);
     CHECK(RasterMaterialV1{}.shaderLayoutHash == kPhase6ShaderLayoutHash);
+    // No captured texture is the common case -- most of the engine's
+    // materials never reach a live capture, and a material that defaulted to
+    // index 0 would silently sample whatever the frame's first texture
+    // happens to be rather than shading from baseColor alone.
+    //
+    // Pinned against the literal bit pattern, not the symbol: comparing
+    // RasterMaterialV1{}.textureIndex to kNoMaterialTexture on both sides of
+    // the same equality is invisible to a mutation that redefines the
+    // constant itself, since both sides move together.
+    CHECK(kNoMaterialTexture == 0xFFFF'FFFFu);
+    CHECK(RasterMaterialV1{}.textureIndex == kNoMaterialTexture);
+}
+
+TEST_CASE("PM_a_material_texture_index_survives_encode_and_decode",
+    "[raster][material]")
+{
+    SyntheticPacketOptions options;
+    auto bytes = BuildSyntheticPacket(options);
+    auto& header = Header(bytes);
+    auto* materials = reinterpret_cast<RasterMaterialV1*>(
+        bytes.data() + header.materialsOffset);
+    materials[0].textureIndex = 7;
+
+    DecodedPacket decoded;
+    REQUIRE(DecodePacket(bytes, decoded).error == PacketError::None);
+    REQUIRE(!decoded.materials.empty());
+    CHECK(decoded.materials[0].textureIndex == 7);
+}
+
+TEST_CASE("PM_the_no_texture_sentinel_survives_encode_and_decode",
+    "[raster][material]")
+{
+    // The default is the sentinel, and the sentinel has to be a value a real
+    // library index can never collide with -- otherwise "no texture" and
+    // "texture number kNoMaterialTexture" are the same bit pattern on the
+    // wire and a decoder cannot tell them apart.
+    SyntheticPacketOptions options;
+    auto bytes = BuildSyntheticPacket(options);
+    DecodedPacket decoded;
+    REQUIRE(DecodePacket(bytes, decoded).error == PacketError::None);
+    REQUIRE(!decoded.materials.empty());
+    CHECK(decoded.materials[0].textureIndex == kNoMaterialTexture);
 }
 
 TEST_CASE("phase6 material registry rejects duplicate stable IDs", "[phase6][raster]")
@@ -424,8 +467,11 @@ TEST_CASE("RP_the_vertex_carries_a_normal_and_older_packets_still_read",
     {
         DecodedPacket check{};
         REQUIRE(DecodePacket(bytes, check));
-        CHECK(check.header.versionMinor ==
-            kPacketVertexNormalVersionMinor);
+        // The encoder stamps whichever version is current, not this test's
+        // own idea of one -- otherwise this assertion goes stale the next
+        // time a field is added anywhere in the packet and starts failing
+        // for a reason that has nothing to do with vertex normals.
+        CHECK(check.header.versionMinor == kPacketVersionMinor);
     }
 
     DecodedPacket round{};
