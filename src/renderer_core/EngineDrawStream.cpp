@@ -439,6 +439,18 @@ DrawStreamError AssembleSceneGeometry(
         keptObjects.reserve(packet.objects.size());
         keptInstances.reserve(packet.instances.size());
 
+        // Instances bucketed by the object they belong to, once. Scanning the
+        // whole instance list per object was the second quadratic pass in
+        // this function and the last one standing after the decode was
+        // cached: nine hundred objects over nine hundred instances.
+        std::vector<std::vector<scene::InstanceV1>> instancesByObject(
+            packet.objects.size());
+        for (const auto& instance : packet.instances) {
+            if (instance.objectIndex < instancesByObject.size()) {
+                instancesByObject[instance.objectIndex].push_back(instance);
+            }
+        }
+
         // Indexed once rather than searched per object. This was a linear scan
         // inside the object loop, so a settled cell of nine hundred objects
         // over nine hundred meshes did most of a million comparisons a frame
@@ -495,8 +507,7 @@ DrawStreamError AssembleSceneGeometry(
             object.drawIndex = kept;
             keptObjects.push_back(object);
             keptMeshes.push_back(found);
-            for (const auto& instance : packet.instances) {
-                if (instance.objectIndex != index) continue;
+            for (const auto& instance : instancesByObject[index]) {
                 auto moved = instance;
                 moved.objectIndex = kept;
                 keptInstances.push_back(moved);
