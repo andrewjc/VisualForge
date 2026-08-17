@@ -45,7 +45,26 @@ void main()
         sceneInstances.records[sceneInstanceIndex];
     GpuVisibilityRecordV1 visibleRecord =
         sceneVisibility.records[sceneObjectIndex];
-    vec4 sampled = textureLod(baseTexture, vertexTexCoord, 0.0);
+    // Per-material when this draw's material named a library entry, and the
+    // frame-wide base texture when it did not.
+    //
+    // The sentinel shades from the material's own base colour with no texture
+    // applied at all -- a white multiplier -- which is precisely what
+    // RenderReferenceTextureLibrary does for kNoMaterialTexture. The two have
+    // to agree exactly here or the GPU contract compares two different rules
+    // and reports the difference as a device defect.
+    // The sentinel keeps the frame-wide base texture rather than shading
+    // white. Every frame that supplies no library binds a white fallback
+    // there, so the two agree wherever the CPU oracle's white-for-sentinel
+    // rule is what is being compared -- and every frame built before the
+    // library existed keeps sampling exactly what it sampled before.
+    vec4 sampled;
+    if (scenePush.textureIndex == 0xFFFFFFFFu) {
+        sampled = textureLod(baseTexture, vertexTexCoord, 0.0);
+    } else {
+        sampled = textureLod(
+            sceneMaterialTextures[scenePush.textureIndex], vertexTexCoord, 0.0);
+    }
     // Per-instance material data modulates only its own instance.
     vec3 shaded = vertexColor * material.baseColor.rgb * sampled.rgb *
         instanceRecord.parameters.rgb;

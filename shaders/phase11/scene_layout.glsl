@@ -121,6 +121,27 @@ layout(set = 0, binding = 16, std430) readonly buffer SceneEnvironment
 // refraction is still whatever is behind the surface.
 layout(set = 0, binding = 19) uniform sampler2D sceneRefractionSource;
 
+// The frame's material textures, one per library entry, selected per draw
+// through scenePush.textureIndex.
+//
+// A separate binding rather than a widening of binding 1: that one is the
+// single base texture the phase 6, 9 and 16 shaders all declare, and each has
+// a build-time reflection gate asserting its exact shape. Taking a fresh
+// binding leaves every one of those untouched.
+//
+// Fixed size, and indexed without nonuniformEXT, because the index arrives in
+// a push constant: it is therefore *dynamically uniform* across the draw, and
+// non-uniform indexing is exactly what nonuniformEXT exists to permit. An
+// unsized array would additionally have forced the extension into every
+// translation unit that includes this file, several of which include it after
+// another header's declarations, where an #extension directive is not valid.
+//
+// Entries past the frame's library count are never sampled but must still be
+// bound, which is what descriptorBindingPartiallyBound is for.
+const uint kSceneMaterialTextureCapacity = 256;
+layout(set = 0, binding = 20) uniform sampler2D
+    sceneMaterialTextures[kSceneMaterialTextureCapacity];
+
 #ifdef VF_RAY_QUERY
 // The scene's top level, holding one instance per drawn object in the same
 // camera-relative space the fragments are shaded in. Declared only in the
@@ -257,5 +278,8 @@ layout(push_constant) uniform ScenePushConstants
     vec3 decalOrigin;
     float decalRadius;
     vec3 decalAxis;
-    float decalPad;
+    // Index into the bound texture array, or 0xFFFFFFFF for "no texture" --
+    // which shades flat from the material base colour, exactly as the CPU
+    // oracle does for the same sentinel.
+    uint textureIndex;
 } scenePush;

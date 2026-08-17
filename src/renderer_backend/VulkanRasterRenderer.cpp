@@ -1379,7 +1379,7 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
 
     // Sixteen always, plus the top level and the geometry-to-object table
     // when ray query is enabled.
-    std::array<VkDescriptorSetLayoutBinding, 19> materialBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 20> materialBindings{};
     materialBindings[0].binding = raster::kMaterialDescriptorBinding;
     materialBindings[0].descriptorType =
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -1458,8 +1458,41 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
     materialBindings[materialBindingCount].stageFlags =
         VK_SHADER_STAGE_FRAGMENT_BIT;
     ++materialBindingCount;
+    // The frame's material textures. Always declared, whether or not a frame
+    // supplies a library: a pipeline layout that changed shape with the
+    // contents of a frame would have to be rebuilt whenever a cell streamed.
+    const auto materialTextureBindingIndex = materialBindingCount;
+    materialBindings[materialBindingCount].binding =
+        scene::kSceneMaterialTextureDescriptorBinding;
+    materialBindings[materialBindingCount].descriptorType =
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    materialBindings[materialBindingCount].descriptorCount =
+        scene::kSceneMaterialTextureCapacity;
+    materialBindings[materialBindingCount].stageFlags =
+        VK_SHADER_STAGE_FRAGMENT_BIT;
+    ++materialBindingCount;
+
+    // Partially bound, because a frame's library is almost never the full
+    // capacity and the descriptors past it are never sampled. Without this
+    // every one of the 256 slots would have to be written with something
+    // valid before any draw could run.
+    std::array<VkDescriptorBindingFlags, 20> materialBindingFlags{};
+    materialBindingFlags[materialTextureBindingIndex] =
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo materialFlagsInfo{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    materialFlagsInfo.bindingCount = materialBindingCount;
+    materialFlagsInfo.pBindingFlags = materialBindingFlags.data();
+
     VkDescriptorSetLayoutCreateInfo materialLayoutInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    // Only when the device was actually given the feature. Requesting
+    // partially-bound descriptors without it is invalid, and this renderer
+    // must still create on a device that lacks descriptor indexing -- it
+    // simply never supplies a library there.
+    if (descriptorIndexingSupported) {
+        materialLayoutInfo.pNext = &materialFlagsInfo;
+    }
     materialLayoutInfo.bindingCount = materialBindingCount;
     materialLayoutInfo.pBindings = materialBindings.data();
     if (vkCreateDescriptorSetLayout(device, &materialLayoutInfo, nullptr,
@@ -1522,7 +1555,10 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
     const std::array poolSizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5},
+        // Five fixed samplers plus the material texture array, whose
+        // descriptors are allocated whether or not a frame fills them.
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            5 + scene::kSceneMaterialTextureCapacity},
         // Ten scene buffers when ray query adds the geometry-to-object table.
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             10 + deform::kDeformBindingCount + gi::kIndirectBindingCount},

@@ -85,6 +85,16 @@ inline constexpr std::uint32_t kSceneGeometryObjectDescriptorBinding = 18;
 // refractive surfaces were drawn before it, so two panes of glass show each
 // other and the image depends on draw order rather than on depth.
 inline constexpr std::uint32_t kSceneRefractionDescriptorBinding = 19;
+// The frame's material textures, one descriptor per texture-library entry,
+// selected per draw through ScenePushConstantsV1::textureIndex. A separate
+// binding from the single base texture at 1, which the phase 6, 9 and 16
+// shaders each declare and each have a build-time reflection gate over.
+inline constexpr std::uint32_t kSceneMaterialTextureDescriptorBinding = 20;
+// Fixed, and mirrored in scene_layout.glsl. The index is a push constant and
+// therefore dynamically uniform, so the array needs no non-uniform indexing;
+// entries past the frame's library count are bound but never sampled, which
+// is what descriptorBindingPartiallyBound permits.
+inline constexpr std::uint32_t kSceneMaterialTextureCapacity = 256;
 inline constexpr std::uint32_t kGpuOpaqueObjectSize = 224;
 inline constexpr std::uint32_t kGpuSceneInstanceSize = 160;
 inline constexpr std::uint32_t kGpuVisibilityRecordSize = 64;
@@ -126,7 +136,11 @@ struct ScenePushConstantsV1
     float decalOrigin[3]{};
     float decalRadius{};
     float decalAxis[3]{0.0f, 0.0f, -1.0f};
-    float decalPad{};
+    // Index into the frame's texture library, or raster::kNoMaterialTexture
+    // when this draw's material has no captured texture. Occupies what was
+    // tail padding, so the block does not grow: a push range is a scarce,
+    // device-limited resource and this needed no more of it.
+    std::uint32_t textureIndex{0xFFFF'FFFFu};
 };
 
 static_assert(sizeof(ScenePushConstantsV1) == 64);
