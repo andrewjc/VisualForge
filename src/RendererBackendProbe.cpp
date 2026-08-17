@@ -369,6 +369,13 @@ std::vector<std::byte> s_mirrorLight;
 // texture its draws sampled. Objects outlive a single draw, so the identity is
 // keyed by the mesh identity the object was built from.
 std::vector<std::byte> s_mirrorTextureLibrary;
+// A once-per-session measurement of what the texture library is worth: the
+// same frame rendered with it withheld, so the difference between the two
+// images is attributable to per-material textures and nothing else. Held
+// rather than discarded so the comparison runs on identical geometry, lights
+// and camera -- a later frame would differ for reasons of its own.
+std::vector<raster::Rgba8> s_mirrorLibraryProbePixels;
+bool s_mirrorLibraryProbeDone{};
 std::unordered_map<std::uint64_t, std::uint64_t> s_mirrorObjectTextures;
 std::uint32_t s_mirrorLibraryTextures = 0;
 std::uint32_t s_mirrorTexturedMaterials = 0;
@@ -1692,6 +1699,38 @@ bool CompositeMirror(
             s_mirrorScene.data());
         request.sceneSize = s_mirrorScene.size();
     }
+    // The withheld arm runs first, so the image that reaches the swapchain is
+    // always the one with the library applied. It costs one extra submission,
+    // once per session, on the first frame that has both a scene and a
+    // library to compare.
+    auto probeArmed = false;
+    if (!s_mirrorLibraryProbeDone && !s_mirrorTextureLibrary.empty() &&
+        !s_mirrorScene.empty()) {
+        try {
+            s_mirrorLibraryProbePixels.assign(s_mirrorPixels.size(),
+                raster::Rgba8{});
+            probeArmed = true;
+        } catch (...) {
+            probeArmed = false;
+        }
+        if (probeArmed) {
+            auto withheld = request;
+            withheld.textureLibraryData = 0;
+            withheld.textureLibrarySize = 0;
+            withheld.outputData = reinterpret_cast<std::uint64_t>(
+                s_mirrorLibraryProbePixels.data());
+            abi::RasterStatusV1 withheldStatus{};
+            withheldStatus.structSize = sizeof(withheldStatus);
+            probeArmed = static_cast<bool>(
+                s_host.RenderRasterFrame(withheld, withheldStatus));
+            if (!probeArmed) {
+                log::Write("renderer-mirror-texture-probe: withheld render "
+                    "failed diagnostic=%s", withheldStatus.diagnostic);
+                s_mirrorLibraryProbeDone = true;
+            }
+        }
+    }
+
     abi::RasterStatusV1 status{};
     status.structSize = sizeof(status);
     if (!s_host.RenderRasterFrame(request, status)) {
@@ -1702,6 +1741,36 @@ bool CompositeMirror(
             s_mirrorRenderFaultLogged = true;
         }
         return false;
+    }
+
+    if (probeArmed) {
+        std::uint64_t differing = 0;
+        std::uint64_t maximumChannel = 0;
+        const auto count = std::min(
+            s_mirrorPixels.size(), s_mirrorLibraryProbePixels.size());
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& applied = s_mirrorPixels[index];
+            const auto& withheld = s_mirrorLibraryProbePixels[index];
+            const auto channel = [](const std::uint8_t left,
+                                    const std::uint8_t right) {
+                return static_cast<std::uint64_t>(
+                    left > right ? left - right : right - left);
+            };
+            const auto worst = std::max({channel(applied.r, withheld.r),
+                channel(applied.g, withheld.g),
+                channel(applied.b, withheld.b)});
+            if (worst != 0) ++differing;
+            maximumChannel = std::max(maximumChannel, worst);
+        }
+        log::Write("renderer-mirror-texture-probe: pixels=%llu differing=%llu "
+            "max-channel=%llu library-bytes=%llu",
+            static_cast<unsigned long long>(count),
+            static_cast<unsigned long long>(differing),
+            static_cast<unsigned long long>(maximumChannel),
+            static_cast<unsigned long long>(s_mirrorTextureLibrary.size()));
+        s_mirrorLibraryProbeDone = true;
+        s_mirrorLibraryProbePixels.clear();
+        s_mirrorLibraryProbePixels.shrink_to_fit();
     }
 
     ID3D11Texture2D* backbuffer{};
