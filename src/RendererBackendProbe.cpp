@@ -2446,11 +2446,9 @@ bool CompositeMirror(
                 window(s_stageExtractUs, s_reportedExtractUs),
                 window(s_stageAssembleUs, s_reportedAssembleUs),
                 window(s_stageCollectUs, s_reportedCollectUs));
-            log::Write("renderer-encode-cache: hits=%llu misses=%llu "
-                "vertices=%zu",
+            log::Write("renderer-encode-cache: hits=%llu misses=%llu",
                 static_cast<unsigned long long>(s_encodeHits),
-                static_cast<unsigned long long>(s_encodeMisses),
-                s_assembled.vertices.size());
+                static_cast<unsigned long long>(s_encodeMisses));
         }
     }
     return presented;
