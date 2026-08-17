@@ -3419,3 +3419,79 @@ gates on a single combined-image-sampler, and `phase11/scene.frag` still
 declares a scalar `baseTexture`. That was explicitly out of scope for this
 goal, which ends at "the CPU has a correct, encoded texture library and knows
 which material wants which entry". It does.
+
+## The Vulkan backend samples a different texture per material
+
+The previous entry ended with the CPU holding a correct texture library and
+the backend still binding one material bundle for the whole frame. That gap is
+now closed: `phase11/scene.frag` samples
+`sceneMaterialTextures[scenePush.textureIndex]`, a 256-entry combined
+image-sampler array at set 0 binding 20, and the per-draw index travels in the
+scene push constants.
+
+### Why a new binding rather than widening binding 1
+
+Binding 1 is the single `baseTexture` the phase 6, 9 and 16 shaders all
+declare, and each has a build-time reflection gate asserting its exact shape.
+Widening it would have meant changing all of them and their gates to buy
+nothing. Binding 20 leaves every one untouched, and the sentinel
+`kNoMaterialTexture` keeps sampling binding 1, so every frame built before the
+library existed renders exactly as it did.
+
+### The index is dynamically uniform, so no `nonuniformEXT`
+
+It arrives in a push constant, which is uniform across the draw by
+construction. `nonuniformEXT` exists for indices that vary across the
+invocations of a single draw, and using it here would have implied a
+requirement the frame does not have. The array is fixed-size for a related
+reason: an unsized one would have forced `#extension` into every translation
+unit including `scene_layout.glsl`, several of which include it after another
+header's declarations, where the directive is not valid.
+
+### Descriptor indexing was required and probed but never enabled
+
+The device query chained `VkPhysicalDeviceVulkan12Features` and reported the
+feature as present, and nothing ever put it in the *enabled* structure at
+device creation. Every frame so far used exactly one descriptor per binding,
+so nothing had noticed. The four descriptor-indexing features are now always
+chained into `enabled12`, and `PrepareMaterialTextures` refuses a
+multi-entry library outright when the device lacks the feature rather than
+partially filling the array -- a frame that sampled index 3 of a one-entry
+array would read an undefined descriptor.
+
+### A stale-library bug the contract caught
+
+`PrepareMaterialTextures` was only called when a frame *supplied* a library.
+A frame that supplied none skipped the call entirely, so the previous frame's
+images stayed resident and binding 20 still pointed at them: its draws sampled
+textures their own packet never named. The contract renders the same scene
+twice, once with the library and once without, and the two came back
+pixel-identical -- `withheld-differing=0` -- which is what exposed it.
+
+The call is now unconditional for any request new enough to carry the field,
+with an empty span releasing the library. Alongside it,
+`ResolveMaterialTextureIndex` honours a material's index only when *this*
+frame's library covers it, and yields the sentinel otherwise. Together those
+make a frame's shading a function of its own packet. The withheld frame now
+differs across 11,974 pixels.
+
+### What the contract asserts
+
+`contract.texture_library_frame` renders the phase 11 scene fixture with
+object 0's material naming a red library entry and object 2's a blue one,
+vertex colours and material base colours flattened to white so the texel is
+the only thing deciding a pixel's hue. It counts, over every pixel the CPU
+oracle painted red, how many the device also painted red, and likewise for
+blue: `red=8844/8844 blue=3130/3130`, `max-error=1`.
+
+Counting whole regions rather than probing two coordinates is deliberate --
+the assertion does not depend on where the projection happens to land each
+triangle. Requiring *both* regions is what makes it discriminating: the
+mutation that makes every material sample entry 0 leaves red untouched and
+collapses blue to `0/3130`. A single-region assertion would have passed it.
+
+### Out of scope, unchanged
+
+Normal maps, the 36% of live draws with no resolvable shader, and the 65%
+material coverage ceiling. This goal ends at "a different texture per
+material, on the device, proved against the oracle".
