@@ -630,8 +630,12 @@ bool BuildLiveSceneGeometry(
     static std::vector<drawstream::DrawRecordV1> recorded(
         engine_draw_capture::kDrawArenaCapacity);
     std::uint64_t dropped = 0;
+    const auto collectStarted = std::chrono::steady_clock::now();
     const auto count = engine_draw_capture::CollectDraws(
         recorded.data(), recorded.size(), dropped);
+    s_stageCollectUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - collectStarted).count());
     if (count == 0) return false;
 
     drawstream::DrawStreamFrame frame{};
