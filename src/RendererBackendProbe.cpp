@@ -2128,7 +2128,24 @@ bool CompositeMirrorImpl(
             RejectionCount(translated,
                 drawstream::DrawStreamError::IndexCountOutOfRange),
             RejectionCount(translated,
-                drawstream::DrawStreamError::ZeroInstances));
+                drawstream::DrawStreamError::ZeroInstances),
+            RejectionCount(translated,
+                drawstream::DrawStreamError::DepthOnlyPass),
+            RejectionCount(translated,
+                drawstream::DrawStreamError::OffscreenPass),
+            // Every reason summed. This must equal `rejected`; when it did not,
+            // the cause was this line itself -- four conversions with no
+            // arguments, printing whatever was on the stack. A breakdown that
+            // cannot be checked against its own total is worse than none,
+            // because it reads like a measurement.
+            [&translated] {
+                std::uint64_t total = 0;
+                for (const auto value : translated.rejectedByReason) {
+                    total += value;
+                }
+                return static_cast<unsigned long long>(total);
+            }(),
+            translated.rejectedByReason.size());
     }
 
     if (!liveScene) {

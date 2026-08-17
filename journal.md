@@ -3795,3 +3795,51 @@ Two caveats on the numbers themselves, both mine:
 
 Neither changes what the mirror does; both change what the log means, which is
 worth stating before someone reads the three numbers as separable.
+
+## The ground was never rendered, and a log line that lied about it
+
+The mirrored scene has no landscape. The reading that it was showing the world
+twice was wrong: what is below the horizon is the undersides and far faces of
+objects, visible because there is no ground in front of them.
+
+The cause is not a regression. Searching for who fills the terrain slot:
+
+- `abi::RasterFrameRequestV1` carries `terrainData`/`terrainSize`.
+- The backend consumes it and has a full terrain path (`phase14TerrainActive`).
+- The only code that ever fills it is `src/tools/PacketReplayMain.cpp`, the
+  offline replay tool.
+- `RendererBackendProbe.cpp` -- the live mirror -- contains the word terrain
+  exactly once, in an unrelated comment.
+
+So Phase 14 is offline-complete and was never promoted to the live mirror,
+which is what the status line at the top of this file already said: "live
+promotion for 8-27 outstanding". The ground has never been in a mirrored frame.
+
+### A diagnostic that printed whatever was on the stack
+
+Chasing this produced a worse finding. The `renderer-draws` line had twenty
+conversions and sixteen arguments: `depth-only`, `offscreen`, `attributed` and
+`slots` had nothing behind them. Two perl edits had added the format text while
+the matching argument edits silently failed to apply, and nothing complained.
+
+They printed as zeros. Zero is a plausible measurement, so it was read as
+evidence that the two new rejection rules were rejecting nothing -- which very
+nearly closed the investigation on the wrong answer. It also made `rejected`
+disagree with the sum of its own reasons by two and a half thousand draws, and
+that discrepancy was itself dismissed as a puzzle rather than treated as the
+symptom it was.
+
+Three things came out of it:
+
+- The arguments are supplied, and the line now prints its own `attributed`
+  total beside `rejected`. A breakdown that cannot be checked against its total
+  is worse than none, because it reads like a measurement.
+- `log::Write` is annotated `_Printf_format_string_`. That only binds under
+  static analysis rather than /W4, so it documents the contract more than it
+  enforces it.
+- `tools/lint/check-log-formats.pl` counts conversions against arguments at
+  every call site. Across 204 sites in the plugin, the core and the tools, the
+  only mismatch was the one above. The checker was wrong twice before it was
+  right -- counting the format string as an argument, then counting commas
+  inside comments -- and each time the fix was to make it disagree with the
+  code for a reason, not to accept a clean result.
