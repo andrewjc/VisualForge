@@ -471,24 +471,39 @@ DrawStreamError AssembleSceneGeometry(
         // inside the object loop, so a settled cell of nine hundred objects
         // over nine hundred meshes did most of a million comparisons a frame
         // and cost 54 ms after the decode itself had been cached away.
-        std::unordered_map<std::uint64_t, const AssembledMesh*> byIdentity;
+        // A sorted vector rather than a hash map: the map allocated a node per
+        // mesh every frame, nine hundred allocations for a lookup table that
+        // is discarded at the end of the call. One buffer and a binary search
+        // costs neither.
+        std::vector<std::pair<std::uint64_t, const AssembledMesh*>> byIdentity;
         byIdentity.reserve(meshes.size());
         for (const auto& mesh : meshes) {
             if (mesh.vertexStride < sizeof(float) * 3 ||
                 mesh.indices.empty() || mesh.vertices.empty()) {
                 continue;
             }
-            // First wins, exactly as the scan did: it stopped at the first
-            // match and later duplicates were never reachable.
-            byIdentity.emplace(mesh.identity, &mesh);
+            byIdentity.emplace_back(mesh.identity, &mesh);
         }
+        // Stable, so that equal identities keep the order they arrived in and
+        // the first one still wins -- exactly as the linear scan did, which
+        // stopped at the first match and never reached later duplicates.
+        std::stable_sort(byIdentity.begin(), byIdentity.end(),
+            [](const auto& left, const auto& right) {
+                return left.first < right.first;
+            });
 
         for (std::size_t index = 0; index < packet.objects.size(); ++index) {
             const AssembledMesh* found = nullptr;
-            if (const auto entry =
-                    byIdentity.find(packet.objects[index].objectId);
-                entry != byIdentity.end()) {
-                found = entry->second;
+            {
+                const auto wanted = packet.objects[index].objectId;
+                const auto entry = std::lower_bound(byIdentity.begin(),
+                    byIdentity.end(), wanted,
+                    [](const auto& candidate, const std::uint64_t value) {
+                        return candidate.first < value;
+                    });
+                if (entry != byIdentity.end() && entry->first == wanted) {
+                    found = entry->second;
+                }
             }
             if (found == nullptr) {
                 ++result.missingMeshes;
