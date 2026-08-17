@@ -443,11 +443,27 @@ DrawStreamError AssembleSceneGeometry(
         // whole instance list per object was the second quadratic pass in
         // this function and the last one standing after the decode was
         // cached: nine hundred objects over nine hundred instances.
-        std::vector<std::vector<scene::InstanceV1>> instancesByObject(
-            packet.objects.size());
+        // Counted and then placed, rather than a vector per object: nine
+        // hundred inner vectors is nine hundred heap allocations every frame,
+        // which cost more than the scan they replaced saved.
+        std::vector<std::uint32_t> instanceStart(packet.objects.size() + 1, 0);
         for (const auto& instance : packet.instances) {
-            if (instance.objectIndex < instancesByObject.size()) {
-                instancesByObject[instance.objectIndex].push_back(instance);
+            if (instance.objectIndex < packet.objects.size()) {
+                ++instanceStart[instance.objectIndex + 1];
+            }
+        }
+        for (std::size_t slot = 1; slot < instanceStart.size(); ++slot) {
+            instanceStart[slot] += instanceStart[slot - 1];
+        }
+        std::vector<std::uint32_t> instanceOrder(instanceStart.back());
+        {
+            auto cursor = instanceStart;
+            for (std::size_t slot = 0; slot < packet.instances.size(); ++slot) {
+                const auto owner = packet.instances[slot].objectIndex;
+                if (owner < packet.objects.size()) {
+                    instanceOrder[cursor[owner]++] =
+                        static_cast<std::uint32_t>(slot);
+                }
             }
         }
 
@@ -507,7 +523,9 @@ DrawStreamError AssembleSceneGeometry(
             object.drawIndex = kept;
             keptObjects.push_back(object);
             keptMeshes.push_back(found);
-            for (const auto& instance : instancesByObject[index]) {
+            for (auto slot = instanceStart[index];
+                slot < instanceStart[index + 1]; ++slot) {
+                const auto& instance = packet.instances[instanceOrder[slot]];
                 auto moved = instance;
                 moved.objectIndex = kept;
                 keptInstances.push_back(moved);
