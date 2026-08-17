@@ -535,6 +535,10 @@ struct VulkanRasterRenderer::Impl
     VkPipeline tonePipeline{VK_NULL_HANDLE};
     VkSampler sampler{VK_NULL_HANDLE};
     std::array<SampledResource, 4> sampledResources;
+    // One per texture-library entry, in library order: the index a material
+    // carries is the index into this.
+    std::vector<SampledResource> materialTextures;
+    std::uint64_t materialTextureSignature{};
     material::MaterialReplayBundle materialBundle;
     material::MaterialGpuRecords materialRecords;
     view::ViewRecordV1 viewRecord;
@@ -674,6 +678,25 @@ struct VulkanRasterRenderer::Impl
         const texture::CapturedTexture& source,
         std::uint64_t signature,
         std::size_t slot) noexcept;
+    [[nodiscard]] abi::Result PrepareSampledResource(
+        SampledResource& resource,
+        const texture::CapturedTexture& source,
+        std::uint64_t signature,
+        std::uint32_t binding,
+        std::uint32_t arrayElement,
+        bool layerArray) noexcept;
+    // The frame's material texture array. Uploaded on its own command buffer
+    // when the library changes rather than through the per-frame staging
+    // layout: a library is hundreds of megabytes and stable for as long as the
+    // cell is, and re-staging it every frame would dominate the frame it is
+    // supposed to be measuring.
+    [[nodiscard]] std::uint32_t ResolveMaterialTextureIndex(
+        const raster::DecodedPacket& packet,
+        std::size_t materialIndex) const noexcept;
+    [[nodiscard]] abi::Result PrepareMaterialTextures(
+        std::span<const texture::CapturedTexture> library,
+        std::uint64_t signature) noexcept;
+    void DestroyMaterialTextures() noexcept;
     [[nodiscard]] abi::Result CreateDeviceBuffer(
         VkDeviceSize size,
         VkBufferUsageFlags usage,
@@ -842,6 +865,7 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
         fenceSubmitted = false;
         DestroyExtent();
         DestroySampledTexture();
+        DestroyMaterialTextures();
         DestroyAccelerationStructures();
         DestroyBuffer(upload);
         DestroyBuffer(deformInput);
@@ -2332,15 +2356,18 @@ abi::Result VulkanRasterRenderer::Impl::CreateImage(
     return abi::Result::Success;
 }
 
-abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
+// Creates the image, view and sampler for one texture and writes it into a
+// descriptor. Shared by the four fixed sampled slots and by every entry of the
+// material texture array, which differ only in where the descriptor lands and
+// whether the view is a layer array.
+abi::Result VulkanRasterRenderer::Impl::PrepareSampledResource(
+    SampledResource& resource,
     const texture::CapturedTexture& source,
     const std::uint64_t signature,
-    const std::size_t slot) noexcept
+    const std::uint32_t binding,
+    const std::uint32_t arrayElement,
+    const bool layerArray) noexcept
 {
-    if (slot >= sampledResources.size()) {
-        return abi::Result::RasterInvalidPacket;
-    }
-    auto& resource = sampledResources[slot];
     if (resource.image.image != VK_NULL_HANDLE &&
         resource.signature == signature) {
         return abi::Result::Success;
@@ -2370,7 +2397,7 @@ abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
         source.arrayLayers == 0 || source.depth != 1) {
         return abi::Result::RasterInvalidPacket;
     }
-    if (isLayerArray != (slot == kTerrainLayerTextureSlot)) {
+    if (isLayerArray != layerArray) {
         return abi::Result::RasterInvalidPacket;
     }
     if (!isLayerArray && source.arrayLayers != 1) {
@@ -2447,7 +2474,7 @@ abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
     viewInfo.image = resource.image.image;
     // The terrain slot is always sampled as an array so a one-layer landscape
     // still matches the shader's sampler2DArray declaration.
-    viewInfo.viewType = slot == kTerrainLayerTextureSlot
+    viewInfo.viewType = layerArray
         ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -2499,15 +2526,295 @@ abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
     descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = materialSet;
-    write.dstBinding = slot == kTerrainLayerTextureSlot
-        ? terrain::kTerrainLayerTextureBinding
-        : raster::kBaseTextureDescriptorBinding +
-            static_cast<std::uint32_t>(slot);
+    write.dstBinding = binding;
+    write.dstArrayElement = arrayElement;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &descriptor;
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     return abi::Result::Success;
+}
+
+void VulkanRasterRenderer::Impl::DestroyMaterialTextures() noexcept
+{
+    for (auto& resource : materialTextures) {
+        if (resource.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, resource.sampler, nullptr);
+        }
+        if (resource.image.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, resource.image.view, nullptr);
+        }
+        if (resource.image.image != VK_NULL_HANDLE) {
+            vkDestroyImage(device, resource.image.image, nullptr);
+        }
+        if (resource.image.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, resource.image.memory, nullptr);
+        }
+    }
+    materialTextures.clear();
+    materialTextureSignature = 0;
+}
+
+// The library entry this draw's material named, or the sentinel.
+//
+// An index is honoured only when *this* frame's library actually covers it.
+// A frame that supplies no library, or a smaller one, must not sample what a
+// previous frame uploaded: binding 20 still holds the descriptors written for
+// that earlier library, and its images may already have been destroyed. The
+// range test is what keeps a frame's shading a function of its own packet.
+//
+// Falling back to the sentinel rather than refusing the frame, because the
+// sentinel is a defined state with a defined appearance -- the frame-wide
+// base texture -- and the alternative is dropping a draw the packet asked for.
+std::uint32_t VulkanRasterRenderer::Impl::ResolveMaterialTextureIndex(
+    const raster::DecodedPacket& packet,
+    const std::size_t materialIndex) const noexcept
+{
+    if (materialIndex >= packet.materials.size()) {
+        return raster::kNoMaterialTexture;
+    }
+    const auto index = packet.materials[materialIndex].textureIndex;
+    if (index >= materialTextures.size()) {
+        return raster::kNoMaterialTexture;
+    }
+    return index;
+}
+
+abi::Result VulkanRasterRenderer::Impl::PrepareMaterialTextures(
+    const std::span<const texture::CapturedTexture> library,
+    const std::uint64_t signature) noexcept
+{
+    // Unchanged libraries cost nothing. This is the common case by a wide
+    // margin: the set of textures a cell draws with is stable for as long as
+    // the player is in it, while this runs every frame.
+    if (signature != 0 && signature == materialTextureSignature &&
+        materialTextures.size() == library.size()) {
+        return abi::Result::Success;
+    }
+    if (library.empty()) {
+        if (!materialTextures.empty()) {
+            static_cast<void>(vkDeviceWaitIdle(device));
+            DestroyMaterialTextures();
+        }
+        return abi::Result::Success;
+    }
+    if (!descriptorIndexingSupported) {
+        // The array is declared in the shader either way, but writing more
+        // than one descriptor into it needs the feature. Refused rather than
+        // partially filled: a frame that sampled index 3 of a one-entry array
+        // would read an undefined descriptor.
+        return abi::Result::RasterUnsupported;
+    }
+    if (library.size() > scene::kSceneMaterialTextureCapacity) {
+        return abi::Result::RasterInvalidPacket;
+    }
+
+    // The old images may still be referenced by a submission in flight.
+    static_cast<void>(vkDeviceWaitIdle(device));
+    DestroyMaterialTextures();
+
+    try {
+        materialTextures.resize(library.size());
+    } catch (...) {
+        return abi::Result::InternalFailure;
+    }
+
+    // Staging for the whole library at once, so the upload is a single
+    // submission rather than one per texture.
+    VkDeviceSize stagingBytes = 0;
+    std::vector<std::vector<VkDeviceSize>> offsets;
+    try {
+        offsets.resize(library.size());
+        for (std::size_t index = 0; index < library.size(); ++index) {
+            offsets[index].reserve(library[index].subresources.size());
+            for (const auto& subresource : library[index].subresources) {
+                stagingBytes = AlignUp(stagingBytes, 16);
+                offsets[index].push_back(stagingBytes);
+                stagingBytes += subresource.bytes.size();
+            }
+        }
+    } catch (...) {
+        DestroyMaterialTextures();
+        return abi::Result::InternalFailure;
+    }
+    if (stagingBytes == 0) {
+        DestroyMaterialTextures();
+        return abi::Result::RasterInvalidPacket;
+    }
+
+    for (std::size_t index = 0; index < library.size(); ++index) {
+        const auto prepared = PrepareSampledResource(
+            materialTextures[index], library[index],
+            signature ^ (static_cast<std::uint64_t>(index) + 1),
+            scene::kSceneMaterialTextureDescriptorBinding,
+            static_cast<std::uint32_t>(index), false);
+        if (prepared != abi::Result::Success) {
+            DestroyMaterialTextures();
+            return prepared;
+        }
+    }
+
+    Buffer staging{};
+    const auto created = CreateHostBuffer(
+        stagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, staging);
+    if (created != abi::Result::Success) {
+        DestroyMaterialTextures();
+        return created;
+    }
+    const auto releaseStaging = [this, &staging]() { DestroyBuffer(staging); };
+
+    // CreateHostBuffer leaves its allocation persistently mapped, so mapping
+    // it again is invalid rather than merely redundant.
+    void* const mapped = staging.mapped;
+    if (mapped == nullptr) {
+        releaseStaging();
+        DestroyMaterialTextures();
+        return abi::Result::InternalFailure;
+    }
+    for (std::size_t index = 0; index < library.size(); ++index) {
+        const auto& subresources = library[index].subresources;
+        for (std::size_t mip = 0; mip < subresources.size(); ++mip) {
+            std::memcpy(static_cast<std::byte*>(mapped) + offsets[index][mip],
+                subresources[mip].bytes.data(), subresources[mip].bytes.size());
+        }
+    }
+    // Not unmapped: the buffer owns its mapping for its whole lifetime and
+    // DestroyBuffer releases it.
+
+    VkCommandBufferAllocateInfo allocateInfo{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocateInfo.commandPool = commandPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    VkCommandBuffer libraryCommand = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(device, &allocateInfo, &libraryCommand) !=
+        VK_SUCCESS) {
+        releaseStaging();
+        DestroyMaterialTextures();
+        return abi::Result::InternalFailure;
+    }
+    const auto releaseCommand = [this, &libraryCommand]() {
+        vkFreeCommandBuffers(device, commandPool, 1, &libraryCommand);
+    };
+
+    VkCommandBufferBeginInfo beginInfo{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(libraryCommand, &beginInfo) != VK_SUCCESS) {
+        releaseCommand();
+        releaseStaging();
+        DestroyMaterialTextures();
+        return abi::Result::InternalFailure;
+    }
+
+    for (std::size_t index = 0; index < library.size(); ++index) {
+        auto& resource = materialTextures[index];
+        const auto& source = library[index];
+        VkImageMemoryBarrier2 toTransfer{
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        toTransfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        toTransfer.srcAccessMask = VK_ACCESS_2_NONE;
+        toTransfer.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toTransfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.image = resource.image.image;
+        toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toTransfer.subresourceRange.baseMipLevel = source.residentBaseMip;
+        toTransfer.subresourceRange.levelCount = source.residentMipCount;
+        toTransfer.subresourceRange.layerCount = source.arrayLayers;
+        VkDependencyInfo transferDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        transferDependency.imageMemoryBarrierCount = 1;
+        transferDependency.pImageMemoryBarriers = &toTransfer;
+        vkCmdPipelineBarrier2(libraryCommand, &transferDependency);
+
+        for (std::size_t mip = 0; mip < source.subresources.size(); ++mip) {
+            const auto& subresource = source.subresources[mip];
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = offsets[index][mip];
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.mipLevel = subresource.mipLevel;
+            copy.imageSubresource.baseArrayLayer = subresource.arrayLayer;
+            copy.imageSubresource.layerCount = 1;
+            copy.imageExtent = {subresource.width, subresource.height, 1};
+            vkCmdCopyBufferToImage(libraryCommand, staging.buffer,
+                resource.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &copy);
+        }
+
+        VkImageMemoryBarrier2 toRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        toRead.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        toRead.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        toRead.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        toRead.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toRead.image = resource.image.image;
+        toRead.subresourceRange = toTransfer.subresourceRange;
+        VkDependencyInfo readDependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        readDependency.imageMemoryBarrierCount = 1;
+        readDependency.pImageMemoryBarriers = &toRead;
+        vkCmdPipelineBarrier2(libraryCommand, &readDependency);
+
+        // Already in its final layout, so the per-frame path must not try to
+        // transition it again.
+        resource.image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        resource.uploadPending = false;
+    }
+
+    if (vkEndCommandBuffer(libraryCommand) != VK_SUCCESS) {
+        releaseCommand();
+        releaseStaging();
+        DestroyMaterialTextures();
+        return abi::Result::InternalFailure;
+    }
+
+    VkCommandBufferSubmitInfo commandInfo{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    commandInfo.commandBuffer = libraryCommand;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &commandInfo;
+    if (vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS ||
+        vkQueueWaitIdle(queue) != VK_SUCCESS) {
+        releaseCommand();
+        releaseStaging();
+        DestroyMaterialTextures();
+        return abi::Result::RasterRenderFailed;
+    }
+
+    releaseCommand();
+    releaseStaging();
+    materialTextureSignature = signature;
+    if (callbacks.log != nullptr) {
+        std::string message{"material textures uploaded count="};
+        message += std::to_string(library.size());
+        message += " bytes=";
+        message += std::to_string(static_cast<std::uint64_t>(stagingBytes));
+        callbacks.log(callbacks.userData, 1u, message.c_str());
+    }
+    return abi::Result::Success;
+}
+
+abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
+    const texture::CapturedTexture& source,
+    const std::uint64_t signature,
+    const std::size_t slot) noexcept
+{
+    if (slot >= sampledResources.size()) {
+        return abi::Result::RasterInvalidPacket;
+    }
+    const auto layerArray = slot == kTerrainLayerTextureSlot;
+    const auto binding = layerArray
+        ? terrain::kTerrainLayerTextureBinding
+        : raster::kBaseTextureDescriptorBinding +
+            static_cast<std::uint32_t>(slot);
+    return PrepareSampledResource(sampledResources[slot], source, signature,
+        binding, 0, layerArray);
 }
 
 // Builds one bottom-level structure holding a geometry per drawn instance and
@@ -4118,8 +4425,9 @@ abi::Result VulkanRasterRenderer::Impl::RecordAlphaDraws(
         // the prepass already wrote.
         vkCmdSetDepthCompareOp(command, depthOnly
             ? ToVkCompare(draw.depthCompare) : VK_COMPARE_OP_EQUAL);
-        const scene::ScenePushConstantsV1 push{
+        scene::ScenePushConstantsV1 push{
             static_cast<std::uint32_t>(index), firstInstance};
+        push.textureIndex = ResolveMaterialTextureIndex(packet, materialIndex);
         vkCmdPushConstants(command, scenePipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(push), &push);
@@ -4705,8 +5013,10 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
             raster::kMaterialDescriptorSet, 1, &materialSet,
             1, &dynamicOffset);
         if (phase11SceneActive) {
-            const scene::ScenePushConstantsV1 push{
+            scene::ScenePushConstantsV1 push{
                 static_cast<std::uint32_t>(index), firstInstance};
+            push.textureIndex =
+                ResolveMaterialTextureIndex(packet, materialIndex);
             vkCmdPushConstants(command, scenePipelineLayout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(push), &push);
@@ -6091,6 +6401,45 @@ abi::Result VulkanRasterRenderer::Render(
             result = impl_->PrepareSampledTexture(
                 sampledSource, sampledSignature, 0);
         }
+    }
+    // The frame's material textures, if it supplied any. Decoded and uploaded
+    // after the single base texture so a frame that supplies both still has
+    // its fixed slots in place; the two are independent bindings.
+    if (result == abi::Result::Success &&
+        request.structSize >=
+            abi::kRasterFrameRequestV1TextureLibraryRequiredSize) {
+        std::vector<texture::CapturedTexture> library;
+        std::uint64_t librarySignature = 0;
+        if (request.textureLibraryData != 0 &&
+            request.textureLibrarySize != 0) {
+            const auto* const libraryAddress =
+                reinterpret_cast<const std::byte*>(
+                    static_cast<std::uintptr_t>(request.textureLibraryData));
+            const std::span libraryBytes{libraryAddress,
+                static_cast<std::size_t>(request.textureLibrarySize)};
+            const auto decoded =
+                texture::DecodeTextureLibrary(libraryBytes, library);
+            if (decoded != texture::TexturePacketError::None) {
+                impl_->FillStatus(status, abi::Result::RasterInvalidPacket,
+                    texture::ToString(decoded));
+                status.packetError = static_cast<std::uint32_t>(decoded);
+                status.frameIndex = packet.header.frameIndex;
+                return abi::Result::RasterInvalidPacket;
+            }
+            // Keyed on the bytes rather than on the count: two libraries of
+            // the same length are not the same library, and re-uploading only
+            // when the content actually changes is what keeps a stable cell
+            // free.
+            librarySignature =
+                (static_cast<std::uint64_t>(request.textureLibrarySize) << 32) ^
+                vf::renderer::trace::Crc32(libraryBytes);
+        }
+        // Called even for a frame that supplies nothing, which is what
+        // releases a previous frame's library. Skipping the call instead
+        // would leave those images resident and binding 20 still pointing at
+        // them, so the next frame's draws would sample textures their own
+        // packet never named.
+        result = impl_->PrepareMaterialTextures(library, librarySignature);
     }
     if (result == abi::Result::Success) {
         result = impl_->CreateExtent(
