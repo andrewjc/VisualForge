@@ -91,7 +91,9 @@ ReferenceRasterError RenderReferenceImpl(
     const DecodedPacket& packet,
     const texture::CapturedTexture* sampledTexture,
     const material::MaterialReplayBundle* sampledMaterial,
-    RasterImage& image) noexcept
+    RasterImage& image,
+    const bool libraryMode = false,
+    const std::span<const texture::CapturedTexture> textureLibrary = {}) noexcept
 {
     image = {};
     if (packet.header.width == 0 || packet.header.height == 0 ||
@@ -145,6 +147,19 @@ ReferenceRasterError RenderReferenceImpl(
             const auto* rasterMaterial = registry.Resolve(draw.materialId);
             if (rasterMaterial == nullptr) {
                 return ReferenceRasterError::InvalidPacket;
+            }
+            // Resolved once per draw, not per pixel: a material's texture
+            // choice does not vary across the triangles it shades, and an
+            // out-of-range index is a malformed frame, refused before any
+            // pixel of this draw is touched rather than at the first pixel
+            // that happens to need it.
+            const texture::CapturedTexture* drawTexture = nullptr;
+            if (libraryMode &&
+                rasterMaterial->textureIndex != kNoMaterialTexture) {
+                if (rasterMaterial->textureIndex >= textureLibrary.size()) {
+                    return ReferenceRasterError::UnsupportedState;
+                }
+                drawTexture = &textureLibrary[rasterMaterial->textureIndex];
             }
             for (std::uint32_t local = 0; local < draw.indexCount; local += 3) {
                 const auto indexA = static_cast<std::size_t>(
@@ -292,7 +307,14 @@ ReferenceRasterError RenderReferenceImpl(
                         }
                         texture::SampledColor sampled{
                             1.0f, 1.0f, 1.0f, 1.0f};
-                        if (sampledTexture != nullptr) {
+                        if (libraryMode) {
+                            if (drawTexture != nullptr &&
+                                texture::SampleTexture2D(
+                                    *drawTexture, u, v, 0.0f, sampled) !=
+                                texture::TexturePacketError::None) {
+                                return ReferenceRasterError::UnsupportedState;
+                            }
+                        } else if (sampledTexture != nullptr) {
                             if (texture::SampleTexture2D(
                                     *sampledTexture, u, v, 0.0f, sampled) !=
                                 texture::TexturePacketError::None) {
@@ -358,6 +380,15 @@ ReferenceRasterError RenderReferenceMaterial(
     RasterImage& image) noexcept
 {
     return RenderReferenceImpl(packet, nullptr, &material, image);
+}
+
+ReferenceRasterError RenderReferenceTextureLibrary(
+    const DecodedPacket& packet,
+    const std::span<const texture::CapturedTexture> library,
+    RasterImage& image) noexcept
+{
+    return RenderReferenceImpl(
+        packet, nullptr, nullptr, image, /*libraryMode=*/true, library);
 }
 
 RasterComparison CompareRaster(

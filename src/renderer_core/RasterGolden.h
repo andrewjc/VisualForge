@@ -64,6 +64,17 @@ struct RasterComparison
     const DecodedPacket& packet,
     const material::MaterialReplayBundle& material,
     RasterImage& image) noexcept;
+// Per-draw texturing: each draw's material selects its own texture from
+// `library` by RasterMaterialV1::textureIndex, or shades flat from baseColor
+// at raster::kNoMaterialTexture. This is the reference the backend's
+// descriptor-indexed array is checked against -- RenderReferenceTextured
+// applies one texture to the whole frame and cannot tell "every material
+// happens to share a texture" from "the renderer cannot address more than
+// one", which is the exact bug this exists to catch.
+[[nodiscard]] ReferenceRasterError RenderReferenceTextureLibrary(
+    const DecodedPacket& packet,
+    std::span<const texture::CapturedTexture> library,
+    RasterImage& image) noexcept;
 [[nodiscard]] ReferenceRasterError ProjectPacketForView(
     const DecodedPacket& packet,
     const view::ViewRecordV1& view,

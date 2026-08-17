@@ -360,9 +360,13 @@ TEST_CASE("phase8 raster packet preserves captured UV coordinates", "[phase8][te
     REQUIRE(EncodePacket(packet, encoded));
     DecodedPacket decoded;
     REQUIRE(DecodePacket(encoded, decoded));
-    // Named rather than compared against kPacketVersionMinor, which would make
-    // the check restate whatever the constant happens to be.
-    CHECK(decoded.header.versionMinor ==
+    // At least the version that introduced texCoord, not exactly it: an
+    // exact match restates today's constant and then goes stale the next
+    // time any field anywhere in the packet earns a version bump, for a
+    // reason that has nothing to do with UV preservation. >= is the actual
+    // invariant this test verifies -- the encoder never stamps a version
+    // older than the format it just wrote.
+    CHECK(decoded.header.versionMinor >=
         kPacketVertexNormalVersionMinor);
     CHECK(decoded.vertices[0].texCoord[0] == 0.125f);
     CHECK(decoded.vertices[0].texCoord[1] == 0.875f);
@@ -410,6 +414,131 @@ TEST_CASE("phase8 textured CPU oracle samples interpolated mesh UVs", "[phase8][
     const auto center = image.At(48, 32);
     CHECK(center.g > center.r);
     CHECK(center.g > center.b);
+}
+
+TEST_CASE("PM_the_reference_shades_each_draw_from_its_own_material_texture")
+{
+    using namespace vf::renderer::raster;
+    // Two triangles, side by side, each its own material, each material
+    // pointing at a different entry in the same two-texture library. If the
+    // renderer applied one texture to the whole frame -- the ceiling this
+    // exists to raise -- both halves would come out identical.
+    DecodedPacket packet{};
+    packet.header.width = 64;
+    packet.header.height = 32;
+    packet.header.frameIndex = 1;
+    packet.header.viewportWidth = 64.0f;
+    packet.header.viewportHeight = 32.0f;
+    packet.header.viewportMaxDepth = 1.0f;
+    packet.header.scissorWidth = 64;
+    packet.header.scissorHeight = 32;
+
+    // Pixel coordinates, converted to NDC -- position is clip space, not
+    // screen space, and passing raw pixel numbers through unconverted put
+    // every vertex outside the viewport entirely on the first attempt here.
+    const auto makeVertex = [](float pixelX, float pixelY, float u, float v) {
+        RasterVertexV3 vertex{};
+        vertex.position[0] = (pixelX / 64.0f) * 2.0f - 1.0f;
+        vertex.position[1] = (pixelY / 32.0f) * 2.0f - 1.0f;
+        vertex.position[2] = 0.5f;
+        vertex.color[0] = vertex.color[1] = vertex.color[2] = 1.0f;
+        vertex.texCoord[0] = u;
+        vertex.texCoord[1] = v;
+        return vertex;
+    };
+    // Vertex order matches the known-good phase6 fixture: the wide pair at
+    // small pixel Y (NDC-negative, screen top), the apex at large pixel Y
+    // (NDC-positive, screen bottom). The mirror image of this order rasterizes
+    // as clockwise and every triangle here is silently dropped by the default
+    // CounterClockwise front face -- which is exactly what the first attempt
+    // at this fixture did, and both centroid samples read pure background.
+    //
+    // Left triangle's centroid is pixel (16,12); right triangle's is (48,12).
+    packet.vertices = {
+        makeVertex(4.0f, 4.0f, 0.0f, 1.0f),
+        makeVertex(28.0f, 4.0f, 1.0f, 1.0f),
+        makeVertex(16.0f, 28.0f, 0.5f, 0.0f),
+        makeVertex(36.0f, 4.0f, 0.0f, 1.0f),
+        makeVertex(60.0f, 4.0f, 1.0f, 1.0f),
+        makeVertex(48.0f, 28.0f, 0.5f, 0.0f),
+    };
+    packet.indices = {0, 1, 2, 3, 4, 5};
+
+    RasterMaterialV1 leftMaterial{};
+    leftMaterial.resourceId = 0x7000'0000'0000'0001ull;
+    leftMaterial.textureIndex = 0;
+    RasterMaterialV1 rightMaterial{};
+    rightMaterial.resourceId = 0x7000'0000'0000'0002ull;
+    rightMaterial.textureIndex = 1;
+    packet.materials = {leftMaterial, rightMaterial};
+
+    RasterDrawV1 leftDraw{};
+    leftDraw.materialId = leftMaterial.resourceId;
+    leftDraw.firstIndex = 0;
+    leftDraw.indexCount = 3;
+    RasterDrawV1 rightDraw{};
+    rightDraw.materialId = rightMaterial.resourceId;
+    rightDraw.firstIndex = 3;
+    rightDraw.indexCount = 3;
+    packet.draws = {leftDraw, rightDraw};
+
+    auto redTexture = MakeFallbackTexture(FallbackTextureRole::White);
+    redTexture.subresources[0].bytes = {
+        std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255}};
+    auto blueTexture = MakeFallbackTexture(FallbackTextureRole::White);
+    blueTexture.subresources[0].bytes = {
+        std::byte{0}, std::byte{0}, std::byte{255}, std::byte{255}};
+    const std::array<CapturedTexture, 2> library{redTexture, blueTexture};
+
+    RasterImage image;
+    REQUIRE(RenderReferenceTextureLibrary(packet, library, image) ==
+        ReferenceRasterError::None);
+
+    const auto left = image.At(16, 12);
+    const auto right = image.At(48, 12);
+    CHECK(left.r > left.b);
+    CHECK(right.b > right.r);
+}
+
+TEST_CASE("PM_a_material_with_no_texture_shades_flat_from_base_colour")
+{
+    using namespace vf::renderer::raster;
+    DecodedPacket packet;
+    REQUIRE(DecodePacket(BuildSyntheticPacket(), packet));
+    packet.vertices[0].texCoord[0] = 0.0f;
+    packet.vertices[0].texCoord[1] = 1.0f;
+    packet.vertices[1].texCoord[0] = 1.0f;
+    packet.vertices[1].texCoord[1] = 1.0f;
+    packet.vertices[2].texCoord[0] = 0.5f;
+    packet.vertices[2].texCoord[1] = 0.0f;
+    REQUIRE(packet.materials[0].textureIndex == kNoMaterialTexture);
+
+    auto greenTexture = MakeFallbackTexture(FallbackTextureRole::White);
+    greenTexture.subresources[0].bytes = {
+        std::byte{0}, std::byte{255}, std::byte{0}, std::byte{255}};
+    const std::array<CapturedTexture, 1> library{greenTexture};
+
+    RasterImage image;
+    REQUIRE(RenderReferenceTextureLibrary(packet, library, image) ==
+        ReferenceRasterError::None);
+    // The library has a texture, but this material does not reference it.
+    // Sampling it anyway is exactly the bug a shared-fallback frame produces.
+    const auto center = image.At(48, 32);
+    CHECK_FALSE(center.g > center.r);
+}
+
+TEST_CASE("PM_a_texture_index_past_the_library_is_refused_not_guessed")
+{
+    using namespace vf::renderer::raster;
+    DecodedPacket packet;
+    REQUIRE(DecodePacket(BuildSyntheticPacket(), packet));
+    packet.materials[0].textureIndex = 5;
+    const std::array<CapturedTexture, 1> library{
+        MakeFallbackTexture(FallbackTextureRole::White)};
+
+    RasterImage image;
+    CHECK(RenderReferenceTextureLibrary(packet, library, image) ==
+        ReferenceRasterError::UnsupportedState);
 }
 
 TEST_CASE("a texture library carries many textures under one contract")
