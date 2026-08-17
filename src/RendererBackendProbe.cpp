@@ -399,6 +399,16 @@ std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 // Plain integers rather than atomics: every one of these is written only from
 // the mirror path, which runs on the presenting thread.
 std::uint64_t s_stageGeometryUs = 0;
+// Inside the geometry stage. Every rebuild the goal named is now cached, and
+// what is left has to be attributed rather than guessed at.
+std::uint64_t s_stageCollectUs = 0;
+std::uint64_t s_stageTranslateUs = 0;
+std::uint64_t s_stageMeshBuildUs = 0;
+std::uint64_t s_stageAssembleUs = 0;
+std::uint64_t s_reportedCollectUs = 0;
+std::uint64_t s_reportedTranslateUs = 0;
+std::uint64_t s_reportedMeshBuildUs = 0;
+std::uint64_t s_reportedAssembleUs = 0;
 std::uint64_t s_stageLibraryUs = 0;
 std::uint64_t s_stageEncodeUs = 0;
 std::uint64_t s_stageLightingUs = 0;
@@ -674,8 +684,13 @@ bool BuildLiveSceneGeometry(
     }
 
     scene::ScenePacket scenePacket{};
-    if (drawstream::TranslateDrawStream(frame, {}, scenePacket, translated) !=
-        drawstream::DrawStreamError::None) {
+    const auto translateStarted = std::chrono::steady_clock::now();
+    const auto translateResult =
+        drawstream::TranslateDrawStream(frame, {}, scenePacket, translated);
+    s_stageTranslateUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - translateStarted).count());
+    if (translateResult != drawstream::DrawStreamError::None) {
         return false;
     }
 
@@ -751,6 +766,7 @@ bool BuildLiveSceneGeometry(
         drawstream::PlanMeshExtraction(frame, {}, cached, budget);
     static_cast<void>(engine_mesh_extractor::Extract(plan.requests));
 
+    const auto meshBuildStarted = std::chrono::steady_clock::now();
     std::vector<drawstream::AssembledMesh> meshes;
     meshes.reserve(scenePacket.objects.size());
     // Counted separately because the two have different causes and different
@@ -2363,6 +2379,11 @@ bool CompositeMirror(
                 window(s_stageLightingUs, s_reportedLightingUs),
                 window(s_stageRenderUs, s_reportedRenderUs),
                 window(s_stagePresentUs, s_reportedPresentUs));
+            log::Write("renderer-suppression-geometry: translate-us=%llu "
+                "mesh-build-us=%llu assemble-us=%llu",
+                window(s_stageTranslateUs, s_reportedTranslateUs),
+                window(s_stageMeshBuildUs, s_reportedMeshBuildUs),
+                window(s_stageAssembleUs, s_reportedAssembleUs));
         }
     }
     return presented;
