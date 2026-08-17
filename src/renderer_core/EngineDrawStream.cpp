@@ -443,6 +443,9 @@ DrawStreamError AssembleSceneGeometry(
         // whole instance list per object was the second quadratic pass in
         // this function and the last one standing after the decode was
         // cached: nine hundred objects over nine hundred instances.
+        rasterPacket.draws.reserve(packet.objects.size());
+        rasterPacket.materials.reserve(packet.objects.size());
+
         // Counted and then placed, rather than a vector per object: nine
         // hundred inner vectors is nine hundred heap allocations every frame,
         // which cost more than the scan they replaced saved.

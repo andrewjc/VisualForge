@@ -823,7 +823,12 @@ bool BuildLiveSceneGeometry(
     // true: a mesh is unchanged when it keeps its identity *and* still points
     // at the same bytes, because an identity alone would call a re-extracted
     // mesh unchanged and a cache keyed on it would render stale geometry.
-    {
+    // Sampled on reporting frames only. Building the comparison map costs a
+    // hash node per mesh and frees the previous one, and doing that on every
+    // frame put the monitor itself into the steady-state cost it exists to
+    // watch. Comparing against the previous sample rather than the previous
+    // frame answers the same question: whether the set is holding still.
+    if (frameId % 120 == 0) {
         struct Fingerprint
         {
             const void* vertices{};
@@ -854,11 +859,9 @@ bool BuildLiveSceneGeometry(
         const auto removed = previous.size() > current.size()
             ? static_cast<std::uint32_t>(previous.size() - current.size())
             : 0u;
-        if (frameId % 120 == 0) {
-            log::Write("renderer-mesh-churn: meshes=%zu unchanged=%u "
-                "changed=%u added=%u removed=%u",
-                meshes.size(), unchanged, changed, added, removed);
-        }
+        log::Write("renderer-mesh-churn: meshes=%zu unchanged=%u "
+            "changed=%u added=%u removed=%u",
+            meshes.size(), unchanged, changed, added, removed);
         previous = std::move(current);
     }
 
