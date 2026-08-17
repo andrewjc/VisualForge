@@ -385,18 +385,50 @@ TEST_CASE("PM_backend_ABI_appends_the_texture_library_after_the_bloom_prefix",
 {
     using namespace vf::renderer::abi;
     CHECK(kBackendAbiTextureLibraryMinor == 13);
-    CHECK(kBackendAbiMinor == kBackendAbiTextureLibraryMinor);
+    // The current minor only has to be at least this phase's. Pinning it to
+    // equality made every later phase edit this line, which is how a version
+    // test stops testing the version and starts testing the last edit.
+    CHECK(kBackendAbiMinor >= kBackendAbiTextureLibraryMinor);
     // The texture library begins exactly where the post-chain block ended,
     // so a backend built before it reads every field it knows at the offset
     // it expects.
     CHECK(offsetof(RasterFrameRequestV1, textureLibraryData) ==
         kRasterFrameRequestV1BloomRequiredSize);
-    CHECK(kRasterFrameRequestV1TextureLibraryRequiredSize ==
+    // A prefix of the struct, not the whole of it: later phases append, and
+    // this phase's requirement must keep naming this phase's last field.
+    CHECK(kRasterFrameRequestV1TextureLibraryRequiredSize <=
         sizeof(RasterFrameRequestV1));
+    CHECK(kRasterFrameRequestV1TextureLibraryRequiredSize ==
+        offsetof(RasterFrameRequestV1, textureLibrarySize) +
+            sizeof(RasterFrameRequestV1::textureLibrarySize));
     CHECK(sizeof(RasterFrameRequestV1) % 8 == 0);
     // A caller that fills only through the bloom fields declares a size
     // below the texture-library requirement, which is what lets the backend
     // tell "no library supplied" from "a library supplied at a stale offset".
     CHECK(kRasterFrameRequestV1BloomRequiredSize <
         kRasterFrameRequestV1TextureLibraryRequiredSize);
+}
+
+TEST_CASE("PM_backend_ABI_appends_the_library_generation_after_the_library",
+    "[material][contract]")
+{
+    using namespace vf::renderer::abi;
+    CHECK(kBackendAbiLibraryGenerationMinor == 14);
+    CHECK(kBackendAbiMinor >= kBackendAbiLibraryGenerationMinor);
+    // Appended, so a backend built before the generation existed reads every
+    // field it knows at the offset it expects and simply never sees this one.
+    CHECK(offsetof(RasterFrameRequestV1, textureLibraryGeneration) ==
+        kRasterFrameRequestV1TextureLibraryRequiredSize);
+    CHECK(kRasterFrameRequestV1LibraryGenerationRequiredSize ==
+        sizeof(RasterFrameRequestV1));
+    // A caller that fills only through the library declares a size below the
+    // generation requirement, which is what lets the backend tell "no
+    // generation tracked" from "a generation at a stale offset" and fall back
+    // to hashing the bytes rather than trusting a field that is not there.
+    CHECK(kRasterFrameRequestV1TextureLibraryRequiredSize <
+        kRasterFrameRequestV1LibraryGenerationRequiredSize);
+    // Zero is reserved for "not tracked", so it can never match a stored
+    // generation and can never suppress an upload.
+    RasterFrameRequestV1 request{};
+    CHECK(request.textureLibraryGeneration == 0);
 }

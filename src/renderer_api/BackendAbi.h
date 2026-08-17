@@ -21,7 +21,9 @@ constexpr std::uint32_t kBackendAbiPhase17Minor = 10;
 constexpr std::uint32_t kBackendAbiPhase20Minor = 11;
 constexpr std::uint32_t kBackendAbiPhase23Minor = 12;
 constexpr std::uint32_t kBackendAbiTextureLibraryMinor = 13;
-constexpr std::uint32_t kBackendAbiMinor = 13;
+// The frame request carries a texture library generation.
+constexpr std::uint32_t kBackendAbiLibraryGenerationMinor = 14;
+constexpr std::uint32_t kBackendAbiMinor = 14;
 constexpr char kBackendQueryExport[] = "VFRenderer_QueryInterface";
 constexpr std::uint32_t kBridgeImageCount = 3;
 
@@ -297,6 +299,14 @@ struct alignas(8) RasterFrameRequestV1
     // than a silently wrong image.
     std::uint64_t textureLibraryData{};
     std::uint64_t textureLibrarySize{};
+    // Changes exactly when the library's contents change, and never otherwise.
+    //
+    // Without it the backend has no cheap way to tell one frame's library from
+    // the next, so it decoded the whole packet and hashed it every frame
+    // before discovering nothing had changed. At a hundred megabytes that was
+    // most of a frame. Zero means the caller does not track a generation and
+    // the backend falls back to hashing the bytes.
+    std::uint64_t textureLibraryGeneration{};
 };
 
 struct alignas(8) RasterStatusV1
@@ -430,6 +440,9 @@ constexpr std::size_t kRasterFrameRequestV1BloomRequiredSize =
 constexpr std::size_t kRasterFrameRequestV1TextureLibraryRequiredSize =
     offsetof(RasterFrameRequestV1, textureLibrarySize) +
     sizeof(RasterFrameRequestV1::textureLibrarySize);
+constexpr std::size_t kRasterFrameRequestV1LibraryGenerationRequiredSize =
+    offsetof(RasterFrameRequestV1, textureLibraryGeneration) +
+    sizeof(RasterFrameRequestV1::textureLibraryGeneration);
 constexpr std::size_t kRasterStatusV1RequiredSize =
     offsetof(RasterStatusV1, reserved);
 constexpr std::size_t kBackendApiV1BridgeRequiredSize =

@@ -541,6 +541,9 @@ struct VulkanRasterRenderer::Impl
     // carries is the index into this.
     std::vector<SampledResource> materialTextures;
     std::uint64_t materialTextureSignature{};
+    // The host-supplied generation the resident library was built from. Zero
+    // when the host does not track one, which keeps the hashing path.
+    std::uint64_t materialTextureGeneration{};
     // Where a frame's time goes inside the backend. `record` covers everything
     // this thread does to build and submit the frame, and contains
     // `acceleration`; `gpuWait` is the fence, so it is what the device
@@ -551,6 +554,10 @@ struct VulkanRasterRenderer::Impl
     std::uint64_t frameGpuWaitUs{};
     std::uint64_t frameCopyUs{};
     std::uint64_t frameTimedCount{};
+    std::uint64_t reportedRecordUs{};
+    std::uint64_t reportedAccelerationUs{};
+    std::uint64_t reportedGpuWaitUs{};
+    std::uint64_t reportedCopyUs{};
     material::MaterialReplayBundle materialBundle;
     material::MaterialGpuRecords materialRecords;
     view::ViewRecordV1 viewRecord;
@@ -2565,6 +2572,7 @@ void VulkanRasterRenderer::Impl::DestroyMaterialTextures() noexcept
     }
     materialTextures.clear();
     materialTextureSignature = 0;
+    materialTextureGeneration = 0;
 }
 
 // The library entry this draw's material named, or the sentinel.
@@ -6428,9 +6436,24 @@ abi::Result VulkanRasterRenderer::Render(
     if (result == abi::Result::Success &&
         request.structSize >=
             abi::kRasterFrameRequestV1TextureLibraryRequiredSize) {
+        const auto generation =
+            request.structSize >=
+                abi::kRasterFrameRequestV1LibraryGenerationRequiredSize
+                    ? request.textureLibraryGeneration
+                    : 0ull;
+        // A generation the backend has already uploaded means the bytes behind
+        // the pointer are the ones it holds, so neither the decode nor the
+        // hash below has anything to discover. Measured at a hundred and
+        // fourteen textures: those two steps were most of the frame, and every
+        // frame threw the result away.
+        const auto libraryUnchanged = generation != 0 &&
+            generation == impl_->materialTextureGeneration &&
+            !impl_->materialTextures.empty();
         std::vector<texture::CapturedTexture> library;
         std::uint64_t librarySignature = 0;
-        if (request.textureLibraryData != 0 &&
+        if (libraryUnchanged) {
+            // Nothing to do: the descriptors already describe this library.
+        } else if (request.textureLibraryData != 0 &&
             request.textureLibrarySize != 0) {
             const auto* const libraryAddress =
                 reinterpret_cast<const std::byte*>(
@@ -6454,12 +6477,19 @@ abi::Result VulkanRasterRenderer::Render(
                 (static_cast<std::uint64_t>(request.textureLibrarySize) << 32) ^
                 vf::renderer::trace::Crc32(libraryBytes);
         }
-        // Called even for a frame that supplies nothing, which is what
-        // releases a previous frame's library. Skipping the call instead
-        // would leave those images resident and binding 20 still pointing at
-        // them, so the next frame's draws would sample textures their own
-        // packet never named.
-        result = impl_->PrepareMaterialTextures(library, librarySignature);
+        if (!libraryUnchanged) {
+            // Called even for a frame that supplies nothing, which is what
+            // releases a previous frame's library. Skipping the call instead
+            // would leave those images resident and binding 20 still pointing
+            // at them, so the next frame's draws would sample textures their
+            // own packet never named.
+            result = impl_->PrepareMaterialTextures(library, librarySignature);
+            // Recorded only on success, so a failed upload cannot make the
+            // next frame believe the library it never finished is resident.
+            if (result == abi::Result::Success) {
+                impl_->materialTextureGeneration = generation;
+            }
+        }
     }
     if (result == abi::Result::Success) {
         result = impl_->CreateExtent(
@@ -6517,15 +6547,21 @@ abi::Result VulkanRasterRenderer::Render(
         ++impl_->frameTimedCount;
         if (impl_->frameTimedCount % 120 == 0 &&
             impl_->callbacks.log != nullptr) {
-            const auto frames = impl_->frameTimedCount;
+            // Windowed for the same reason the host stages are: a mean since
+            // load never recovers from the loading phase.
+            const auto window = [](std::uint64_t total, std::uint64_t& reported) {
+                const auto delta = total - reported;
+                reported = total;
+                return delta / 120;
+            };
             std::string message{"frame timing record-us="};
-            message += std::to_string(impl_->frameRecordUs / frames);
+            message += std::to_string(window(impl_->frameRecordUs, impl_->reportedRecordUs));
             message += " acceleration-us=";
-            message += std::to_string(impl_->frameAccelerationUs / frames);
+            message += std::to_string(window(impl_->frameAccelerationUs, impl_->reportedAccelerationUs));
             message += " gpu-wait-us=";
-            message += std::to_string(impl_->frameGpuWaitUs / frames);
+            message += std::to_string(window(impl_->frameGpuWaitUs, impl_->reportedGpuWaitUs));
             message += " readback-us=";
-            message += std::to_string(impl_->frameCopyUs / frames);
+            message += std::to_string(window(impl_->frameCopyUs, impl_->reportedCopyUs));
             impl_->callbacks.log(
                 impl_->callbacks.userData, 1u, message.c_str());
         }

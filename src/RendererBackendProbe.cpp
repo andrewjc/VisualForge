@@ -374,6 +374,9 @@ std::vector<std::byte> s_mirrorTextureLibrary;
 // The library entries in index order, and the reverse mapping. Persistent so
 // an index handed to a material stays valid across frames and the bytes only
 // have to be rebuilt when the set actually gains a texture.
+// Bumped whenever the encoded library changes, so the backend can tell one
+// frame.s library from the next without decoding or hashing it.
+std::uint64_t s_mirrorLibraryGeneration = 0;
 std::vector<std::uint64_t> s_mirrorLibraryIds;
 std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 // A once-per-session measurement of what the texture library is worth: the
@@ -393,6 +396,14 @@ std::uint64_t s_stageEncodeUs = 0;
 std::uint64_t s_stageLightingUs = 0;
 std::uint64_t s_stageRenderUs = 0;
 std::uint64_t s_stagePresentUs = 0;
+// What the last report already accounted for, so each line covers only the
+// frames since the previous one.
+std::uint64_t s_reportedGeometryUs = 0;
+std::uint64_t s_reportedLibraryUs = 0;
+std::uint64_t s_reportedEncodeUs = 0;
+std::uint64_t s_reportedLightingUs = 0;
+std::uint64_t s_reportedRenderUs = 0;
+std::uint64_t s_reportedPresentUs = 0;
 
 class StageTimer
 {
@@ -864,6 +875,9 @@ bool BuildLiveSceneGeometry(
                 s_mirrorLibraryIndexOf.clear();
                 s_mirrorTextureLibrary.clear();
             }
+            // Bumped on both paths: an emptied library is as much a change as
+            // a re-encoded one, and the backend has to release what it holds.
+            ++s_mirrorLibraryGeneration;
         }
         s_mirrorLibraryTextures =
             static_cast<std::uint32_t>(s_mirrorLibraryIds.size());
@@ -1791,6 +1805,7 @@ bool CompositeMirrorImpl(
         request.textureLibraryData = reinterpret_cast<std::uint64_t>(
             s_mirrorTextureLibrary.data());
         request.textureLibrarySize = s_mirrorTextureLibrary.size();
+        request.textureLibraryGeneration = s_mirrorLibraryGeneration;
     }
     request.packetData = reinterpret_cast<std::uint64_t>(
         s_mirrorPacket.data());
@@ -2025,21 +2040,24 @@ bool CompositeMirror(
             // read as a share of the frame directly. `geometry` contains
             // `library` and `encode`, which are reported inside it because
             // each has its own fix.
+            // Windowed, not cumulative. A mean taken since load is dominated
+            // by the cell-loading phase forever after, which made a steady
+            // state of half a millisecond read as thirty.
+            const auto window = [](std::uint64_t& total,
+                                   std::uint64_t& reported) {
+                const auto delta = total - reported;
+                reported = total;
+                return static_cast<unsigned long long>(delta / 120);
+            };
             log::Write("renderer-suppression-stages: geometry-us=%llu "
                 "library-us=%llu encode-us=%llu lighting-us=%llu "
                 "render-us=%llu present-us=%llu",
-                static_cast<unsigned long long>(
-                    s_stageGeometryUs / s_mirrorTimedFrames),
-                static_cast<unsigned long long>(
-                    s_stageLibraryUs / s_mirrorTimedFrames),
-                static_cast<unsigned long long>(
-                    s_stageEncodeUs / s_mirrorTimedFrames),
-                static_cast<unsigned long long>(
-                    s_stageLightingUs / s_mirrorTimedFrames),
-                static_cast<unsigned long long>(
-                    s_stageRenderUs / s_mirrorTimedFrames),
-                static_cast<unsigned long long>(
-                    s_stagePresentUs / s_mirrorTimedFrames));
+                window(s_stageGeometryUs, s_reportedGeometryUs),
+                window(s_stageLibraryUs, s_reportedLibraryUs),
+                window(s_stageEncodeUs, s_reportedEncodeUs),
+                window(s_stageLightingUs, s_reportedLightingUs),
+                window(s_stageRenderUs, s_reportedRenderUs),
+                window(s_stagePresentUs, s_reportedPresentUs));
         }
     }
     return presented;
