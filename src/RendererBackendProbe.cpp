@@ -668,6 +668,12 @@ bool BuildLiveSceneGeometry(
         for (std::size_t index = 0; index < count; ++index) {
             const auto& draw = recorded[index];
             if (draw.sceneDepthBound) ++onSceneDepth;
+            // Two thirds of recorded draws are depth-only or off-screen and
+            // are rejected before they can become an object. Hashing their
+            // identity and probing two persistent maps for each of them was
+            // most of the remaining frame: four thousand of six thousand
+            // draws paying for bookkeeping that is then discarded.
+            if (!draw.hasPixelShader || !draw.sceneDepthBound) continue;
             if (draw.baseColorTexture == 0) continue;
             ++withTexture;
             s_mirrorObjectTextures.emplace(
@@ -799,6 +805,10 @@ bool BuildLiveSceneGeometry(
     static std::unordered_map<std::uint64_t, std::pair<bool, std::uint32_t>>
         winding;
     for (const auto& record : frame.draws) {
+        // Same reason as the texture map above: a draw that cannot become an
+        // object has no winding worth recording, and probing the map for it
+        // costs a hash and a miss on a table that grows all session.
+        if (!record.hasPixelShader || !record.sceneDepthBound) continue;
         winding.try_emplace(drawstream::MeshIdentity(record),
             record.frontCounterClockwise, record.cullMode);
     }
