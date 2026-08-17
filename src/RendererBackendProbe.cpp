@@ -673,9 +673,75 @@ bool BuildLiveSceneGeometry(
         }
     }
 
+    // Everything the scene derivation reads, hashed once.
+    //
+    // Translating six thousand draws into a scene packet, narrowing it against
+    // the camera and assembling it produced an identical result every frame on
+    // a settled cell, and that was the last of the per-frame rebuilds. The key
+    // covers each draw's geometry range, its placement and the state that
+    // decides whether it is world geometry at all, plus the camera origin the
+    // narrowing subtracts -- so a moved object, a moved camera or a changed
+    // pass all miss it.
+    std::uint64_t sceneSignature = 0xCBF2'9CE4'8422'2325ull;
+    const auto foldScene = [&sceneSignature](const std::uint64_t value) {
+        sceneSignature = (sceneSignature ^ value) * 0x0000'0100'0000'01B3ull;
+    };
+    foldScene(frame.draws.size());
+    for (const auto& draw : frame.draws) {
+        foldScene(draw.vertexBuffer);
+        foldScene(draw.indexBuffer);
+        foldScene(draw.inputLayout);
+        foldScene(static_cast<std::uint64_t>(draw.vertexStride) |
+            (static_cast<std::uint64_t>(draw.vertexByteOffset) << 32));
+        foldScene(static_cast<std::uint64_t>(draw.indexCount) |
+            (static_cast<std::uint64_t>(draw.startIndex) << 32));
+        foldScene(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(draw.baseVertex)) |
+            (static_cast<std::uint64_t>(draw.instanceCount) << 32));
+        foldScene(static_cast<std::uint64_t>(draw.indexFormat) |
+            (static_cast<std::uint64_t>(draw.indexOffset) << 32));
+        foldScene((draw.hasTransform ? 1ull : 0ull) |
+            (draw.hasPixelShader ? 2ull : 0ull) |
+            (draw.sceneDepthBound ? 4ull : 0ull) |
+            (draw.frontCounterClockwise ? 8ull : 0ull) |
+            (static_cast<std::uint64_t>(draw.cullMode) << 8));
+        // The placement, bit for bit. A transform that moved by a hair still
+        // moves the object, and comparing floats loosely here would hold a
+        // stale scene while the world drifted.
+        std::uint64_t placement = 0;
+        for (const auto value : draw.model) {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &value, sizeof(bits));
+            placement = (placement ^ bits) * 0x0000'0100'0000'01B3ull;
+        }
+        foldScene(placement);
+    }
+    foldScene(static_cast<std::uint64_t>(record.flags));
+    for (const auto value : record.cameraRelativeOrigin) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        foldScene(bits);
+    }
+
+    static scene::ScenePacket s_cachedScene;
+    static drawstream::TranslationResult s_cachedTranslated;
+    static drawstream::AssemblyResult s_cachedAssembly;
+    static std::uint64_t s_cachedSceneSignature = 0;
+    static bool s_cachedSceneValid = false;
+    const auto reuseScene =
+        s_cachedSceneValid && sceneSignature == s_cachedSceneSignature;
+
     scene::ScenePacket scenePacket{};
-    if (drawstream::TranslateDrawStream(frame, {}, scenePacket, translated) !=
-        drawstream::DrawStreamError::None) {
+    if (reuseScene) {
+        // The cached packet is the post-assembly one, so reusing it skips the
+        // narrowing and the assembly below as well.
+        scenePacket = s_cachedScene;
+        translated = s_cachedTranslated;
+        assembly = s_cachedAssembly;
+    } else if (drawstream::TranslateDrawStream(
+        frame, {}, scenePacket, translated) !=
+            drawstream::DrawStreamError::None) {
+        s_cachedSceneValid = false;
         return false;
     }
 
@@ -691,7 +757,7 @@ bool BuildLiveSceneGeometry(
     // Measured before this existed: every instance sat about a hundred and
     // twenty thousand units from the rendered origin with nothing below eye
     // level, and the cell drew as a band on the horizon.
-    if ((record.flags & view::ViewCameraRelative) != 0 &&
+    if (!reuseScene && (record.flags & view::ViewCameraRelative) != 0 &&
         !scenePacket.instances.empty()) {
         std::array<double, 3> origin{
             record.cameraRelativeOrigin[0],
@@ -751,7 +817,10 @@ bool BuildLiveSceneGeometry(
         drawstream::PlanMeshExtraction(frame, {}, cached, budget);
     static_cast<void>(engine_mesh_extractor::Extract(plan.requests));
 
+    // Skipped whole on a reuse frame: the meshes only feed the assembly, and
+    // the assembly is what the cached scene packet already is.
     std::vector<drawstream::AssembledMesh> meshes;
+    if (!reuseScene) {
     meshes.reserve(scenePacket.objects.size());
     // Counted separately because the two have different causes and different
     // fixes: geometry not read back yet is a budget filling in over frames,
@@ -871,6 +940,8 @@ bool BuildLiveSceneGeometry(
             static_cast<unsigned long long>(layouts.unbuildable));
     }
 
+    }
+
     // The scene must name the frame and view the camera packet declares, or
     // the backend refuses it for a frame mismatch.
     scenePacket.header.frameId = frameId;
@@ -887,13 +958,25 @@ bool BuildLiveSceneGeometry(
     // Taken before the call, because a rejected assembly clears the objects it
     // was given and the count is the first thing worth knowing about it.
     const auto offered = scenePacket.objects.size();
-    const auto assembled = drawstream::AssembleSceneGeometry(scenePacket,
-        meshes, rasterPacket, assembly, &s_arena);
+    const auto assembled = reuseScene
+        ? drawstream::DrawStreamError::None
+        : drawstream::AssembleSceneGeometry(scenePacket,
+            meshes, rasterPacket, assembly, &s_arena);
     if (assembled != drawstream::DrawStreamError::None) {
         // The arena describes geometry this assembly did not finish, so it
         // must not be carried into the next frame.
         s_arena.slots.clear();
         rasterPacket = {};
+        s_cachedSceneValid = false;
+    } else if (!reuseScene) {
+        // Cached after the assembly, because the assembly prunes the objects
+        // whose geometry has not been read back yet: caching the packet before
+        // that would restore objects the next frame had already dropped.
+        s_cachedScene = scenePacket;
+        s_cachedTranslated = translated;
+        s_cachedAssembly = assembly;
+        s_cachedSceneSignature = sceneSignature;
+        s_cachedSceneValid = true;
     }
     if (assembled != drawstream::DrawStreamError::None) {
         // The only path out of this function that said nothing at all. Both
