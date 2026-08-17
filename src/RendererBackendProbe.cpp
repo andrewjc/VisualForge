@@ -376,9 +376,19 @@ std::vector<std::byte> s_mirrorTextureLibrary;
 // and camera -- a later frame would differ for reasons of its own.
 std::vector<raster::Rgba8> s_mirrorLibraryProbePixels;
 bool s_mirrorLibraryProbeDone{};
+std::uint32_t s_mirrorLibraryProbeAttempts{};
+// The first frame holding *a* library is not a frame worth measuring: the
+// load screen carries four materials and two textures, and the world that
+// follows carries hundreds. Measuring the first one answers a question nobody
+// asked. The probe waits for a library with real coverage and then keeps
+// measuring until it observes an actual difference, so the run cannot report
+// "no effect" from a frame where the effect had nothing to act on.
+constexpr std::uint32_t kMirrorLibraryProbeMinimumTextures = 8;
+constexpr std::uint32_t kMirrorLibraryProbeMaximumAttempts = 8;
 std::unordered_map<std::uint64_t, std::uint64_t> s_mirrorObjectTextures;
 std::uint32_t s_mirrorLibraryTextures = 0;
 std::uint32_t s_mirrorTexturedMaterials = 0;
+std::uint32_t s_mirrorProbeMaterialCount = 0;
 environment::EnvironmentSourceError s_mirrorLightError =
     environment::EnvironmentSourceError::NoCandidate;
 // Logged on change rather than once. The first attempt happens during the
@@ -741,6 +751,8 @@ bool BuildLiveSceneGeometry(
     s_mirrorTextureLibrary.clear();
     s_mirrorLibraryTextures = 0;
     s_mirrorTexturedMaterials = 0;
+    s_mirrorProbeMaterialCount =
+        static_cast<std::uint32_t>(rasterPacket.materials.size());
     {
         std::vector<texture::CapturedTexture> library;
         std::unordered_map<std::uint64_t, std::uint32_t> indexOf;
@@ -1704,8 +1716,9 @@ bool CompositeMirror(
     // once per session, on the first frame that has both a scene and a
     // library to compare.
     auto probeArmed = false;
-    if (!s_mirrorLibraryProbeDone && !s_mirrorTextureLibrary.empty() &&
-        !s_mirrorScene.empty()) {
+    if (!s_mirrorLibraryProbeDone && !s_mirrorScene.empty() &&
+        !s_mirrorTextureLibrary.empty() &&
+        s_mirrorLibraryTextures >= kMirrorLibraryProbeMinimumTextures) {
         try {
             s_mirrorLibraryProbePixels.assign(s_mirrorPixels.size(),
                 raster::Rgba8{});
@@ -1762,15 +1775,27 @@ bool CompositeMirror(
             if (worst != 0) ++differing;
             maximumChannel = std::max(maximumChannel, worst);
         }
-        log::Write("renderer-mirror-texture-probe: pixels=%llu differing=%llu "
-            "max-channel=%llu library-bytes=%llu",
+        ++s_mirrorLibraryProbeAttempts;
+        log::Write("renderer-mirror-texture-probe: attempt=%u pixels=%llu "
+            "differing=%llu max-channel=%llu library=%u textured=%u "
+            "materials=%u",
+            s_mirrorLibraryProbeAttempts,
             static_cast<unsigned long long>(count),
             static_cast<unsigned long long>(differing),
             static_cast<unsigned long long>(maximumChannel),
-            static_cast<unsigned long long>(s_mirrorTextureLibrary.size()));
-        s_mirrorLibraryProbeDone = true;
-        s_mirrorLibraryProbePixels.clear();
-        s_mirrorLibraryProbePixels.shrink_to_fit();
+            s_mirrorLibraryTextures, s_mirrorTexturedMaterials,
+            s_mirrorProbeMaterialCount);
+        // Latched on the first frame that actually shows a difference. A zero
+        // is not a result here -- it means the textured materials this frame
+        // happened to contribute no visible pixels -- so it is retried rather
+        // than reported as the answer, up to a cap that keeps the extra
+        // submission off the steady-state frame cost.
+        if (differing != 0 ||
+            s_mirrorLibraryProbeAttempts >= kMirrorLibraryProbeMaximumAttempts) {
+            s_mirrorLibraryProbeDone = true;
+            s_mirrorLibraryProbePixels.clear();
+            s_mirrorLibraryProbePixels.shrink_to_fit();
+        }
     }
 
     ID3D11Texture2D* backbuffer{};

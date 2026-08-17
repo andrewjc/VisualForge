@@ -3507,3 +3507,41 @@ The run itself is deferred: a user-owned Fallout 4 process was present at every
 check, and the invariant is to defer rather than adopt or disturb it. Nothing
 about the GPU result waits on this; the live probe measures the same property
 in the engine that `contract.texture_library_frame` measures on the bench.
+
+### The live A/B, and why the first one measured nothing
+
+The first run reported `differing=0`, and the probe was right to report it: it
+had fired on the load screen. `renderer-texlib` at that moment read
+`materials=4 textured=2 library=2`, while the world that followed read
+`materials=351 textured=29 library=20`. The first frame *holding a library* is
+not the first frame *worth measuring*, and the two were being confused.
+
+The probe now waits for a library of at least eight entries and, having
+measured, latches only on a non-zero difference -- retrying up to eight
+attempts otherwise. A zero is not an answer here; it means the textured
+materials that frame contributed no visible pixels, which is a statement about
+the frame rather than about the library. The cap keeps the extra submission off
+the steady-state frame cost.
+
+Second run, Sanctuary, 1280x720:
+
+```
+renderer-mirror-texture-probe: attempt=1 pixels=921600 differing=16996
+  max-channel=187 library=20 textured=29 materials=351
+```
+
+16,996 of 921,600 pixels move when the library is supplied, with a maximum
+channel delta of 187. The withheld arm renders first, so the image reaching the
+swapchain is always the one with textures applied.
+
+### A cost this run made visible
+
+The library is rebuilt from scratch whenever its contents change --
+`DestroyMaterialTextures` then a fresh upload of every entry, behind a
+`vkDeviceWaitIdle`. Walking into Sanctuary changed it eleven times in ninety
+seconds, climbing to 110 textures and 122 MB, so the frame that follows each
+change pays a full pipeline stall plus a re-upload of textures that did not
+change. The signature check makes a *stable* library free, which is the common
+case once a cell settles, but the settling itself is expensive. An incremental
+path that adds only new entries is the obvious next move and is not part of
+this goal.
