@@ -9,13 +9,12 @@
 // of times a frame and must not do more than an atomic load.
 namespace vf::world_suppression {
 
-// Off unless the process was started with VISUALFORGE_SUPPRESS_WORLD=1.
+// On by default; VISUALFORGE_SUPPRESS_WORLD=0 turns it off.
 //
-// Opt-in because suppression trades a complete picture for an honest
-// measurement: the mirror reproduces a subset of the world, so a suppressed
-// frame is visibly incomplete by exactly the amount the mirror has yet to
-// cover. That is the correct configuration for measuring this renderer and the
-// wrong one for looking at the game.
+// Default-on because the engine drawing a world the mirror then overwrites is
+// wasted work in every configuration. The cost is that a suppressed frame is
+// incomplete by exactly the amount the mirror has yet to reproduce, so the
+// opt-out exists for a run that needs the vanilla world to compare against.
 [[nodiscard]] bool Enabled() noexcept;
 
 // Reads the environment once and logs the resulting mode. Safe to call more

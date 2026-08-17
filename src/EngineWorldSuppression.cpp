@@ -6,6 +6,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cstring>
 
 namespace vf::world_suppression {
 
@@ -24,13 +25,20 @@ std::atomic<bool> s_worldReproduced{false};
 std::atomic<std::uint64_t> s_suppressed{0};
 std::atomic<std::uint64_t> s_forwarded{0};
 
+// On unless explicitly turned off. The engine drawing a world that is then
+// overwritten is pure waste, and leaving it on by default made every run
+// measure two renderers. `VISUALFORGE_SUPPRESS_WORLD=0` restores the vanilla
+// world for a run that wants to compare against it.
 bool ReadEnvironmentFlag() noexcept
 {
     char value[16]{};
     const auto length = ::GetEnvironmentVariableA(
         "VISUALFORGE_SUPPRESS_WORLD", value, sizeof(value));
-    if (length == 0 || length >= sizeof(value)) return false;
-    return value[0] == '1';
+    // Unset, or too long to be one of the words below, is the default.
+    if (length == 0 || length >= sizeof(value)) return true;
+    return !(_stricmp(value, "0") == 0 ||
+        _stricmp(value, "false") == 0 ||
+        _stricmp(value, "off") == 0);
 }
 
 }
@@ -48,11 +56,12 @@ void Initialize() noexcept
     // this line in a performance log needs to know the picture was expected to
     // be incomplete without going to look it up.
     log::Write(enabled
-        ? "renderer-suppression: world draws will be dropped once the mirror "
-          "is presenting; the world is incomplete by whatever the mirror does "
-          "not yet reproduce, which is the point of the measurement"
-        : "renderer-suppression: off; vanilla draws the world and the mirror "
-          "renders alongside it");
+        ? "renderer-suppression: on; world draws are dropped once the mirror "
+          "is presenting, so the engine does not draw a world this renderer "
+          "overwrites. The world is incomplete by whatever the mirror does not "
+          "yet reproduce"
+        : "renderer-suppression: off by VISUALFORGE_SUPPRESS_WORLD; vanilla "
+          "draws the world and the mirror renders alongside it");
 }
 
 bool Enabled() noexcept
