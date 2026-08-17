@@ -466,7 +466,18 @@ DrawStreamError AssembleSceneGeometry(
             // zero-based and every mesh keeps the numbering it was read with.
             draw.vertexOffset =
                 static_cast<std::int32_t>(rasterPacket.vertices.size());
-            draw.frontFace = raster::FrontFace::CounterClockwise;
+            // The winding the engine itself declared for this draw.
+            //
+            // This was `CounterClockwise` for every mesh, which is the
+            // opposite of D3D11's default and rendered every model inside
+            // out: the near faces were culled and the far interior kept. It
+            // cannot be a constant, because it depends on the rasterizer
+            // state the engine bound. A draw whose thread never saw a state
+            // takes D3D11's documented default, clockwise-front, rather than
+            // the reverse.
+            draw.frontFace = mesh.frontCounterClockwise
+                ? raster::FrontFace::CounterClockwise
+                : raster::FrontFace::Clockwise;
             draw.depthCompare = raster::DepthCompare::Less;
             rasterPacket.draws.push_back(draw);
 

@@ -730,6 +730,14 @@ bool BuildLiveSceneGeometry(
     // run while both looked identical from outside.
     std::uint32_t notExtracted = 0;
     std::uint32_t noLayout = 0;
+    // The rasterizer state each mesh was drawn under, keyed by the same
+    // identity the scene objects carry. Built from the same records the scene
+    // packet was translated from, so a mesh and its winding cannot disagree.
+    std::unordered_map<std::uint64_t, std::pair<bool, std::uint32_t>> winding;
+    for (const auto& record : frame.draws) {
+        winding.emplace(drawstream::MeshIdentity(record),
+            std::pair{record.frontCounterClockwise, record.cullMode});
+    }
     for (const auto& object : scenePacket.objects) {
         const auto* const held =
             engine_mesh_extractor::Find(object.objectId);
@@ -750,6 +758,13 @@ bool BuildLiveSceneGeometry(
         }
         mesh.vertices = held->vertices;
         mesh.indices = held->indices;
+        // Absent only if the mesh outlived the record that drew it, in which
+        // case the defaults above stand and the runtime.s own defaults apply.
+        if (const auto found = winding.find(object.objectId);
+            found != winding.end()) {
+            mesh.frontCounterClockwise = found->second.first;
+            mesh.cullMode = found->second.second;
+        }
         meshes.push_back(mesh);
     }
 

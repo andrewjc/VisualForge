@@ -57,9 +57,32 @@ struct DrawRecordV1
     // technique bound at the time, exactly as the lighting constant's offset
     // was a property of the shader that declared it.
     std::uint64_t baseColorTexture{};
+    // The rasterizer state this draw ran under, read from the engine rather
+    // than assumed.
+    //
+    // Assuming it is how the mirror rendered every model inside out: the
+    // stream declared counter-clockwise front faces for everything, while
+    // D3D11's own default is `FrontCounterClockwise = FALSE`. Which way round
+    // it actually is depends on the engine's state *and* on the handedness of
+    // the captured view, so it is the one thing here that must never be a
+    // constant.
+    //
+    // `false` when no rasterizer state was ever bound on the drawing thread,
+    // which is D3D11's documented default state rather than a guess.
+    bool frontCounterClockwise{};
+    // D3D11_CULL_MODE: 1 NONE, 2 FRONT, 3 BACK. Zero means no state was seen;
+    // the reader treats that as the D3D default of BACK. Carried raw so the
+    // core does not depend on a D3D header.
+    std::uint32_t cullMode{};
     // Row-major 4x4, exactly as the vertex-shader constant buffer holds it.
     float model[16]{};
 };
+
+// D3D11_CULL_MODE, named here so the assembler is not comparing bare numbers.
+inline constexpr std::uint32_t kCullModeUnknown = 0;
+inline constexpr std::uint32_t kCullModeNone = 1;
+inline constexpr std::uint32_t kCullModeFront = 2;
+inline constexpr std::uint32_t kCullModeBack = 3;
 
 enum class DrawStreamError : std::uint8_t
 {
@@ -221,6 +244,12 @@ struct AssembledMesh
     mesh::EngineVertexLayout layout;
     std::span<const std::byte> vertices;
     std::span<const std::uint32_t> indices;
+    // The rasterizer state the engine drew this mesh under, carried from the
+    // draw record that produced it. Defaults are D3D11's own defaults, so a
+    // mesh whose state was never observed is culled the way the runtime would
+    // have culled it rather than the way the mirror once assumed.
+    bool frontCounterClockwise{};
+    std::uint32_t cullMode{kCullModeUnknown};
 };
 
 struct AssemblyResult

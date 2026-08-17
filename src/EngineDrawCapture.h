@@ -135,7 +135,13 @@ struct LayoutStats
     void* setPsConstantBuffers,
     void* createPixelShader,
     void* updateSubresource,
-    void* setPixelShader) noexcept;
+    void* setPixelShader,
+    // ID3D11Device slot 22 and ID3D11DeviceContext slot 43. Creation is the
+    // only moment a rasterizer state's description is visible -- D3D11 offers
+    // no way to read a D3D11_RASTERIZER_DESC back off the object, exactly as
+    // it offers none for an input layout's elements.
+    void* createRasterizerState,
+    void* setRasterizerState) noexcept;
 
 // A constant buffer as the shader that uses it declares it.
 //

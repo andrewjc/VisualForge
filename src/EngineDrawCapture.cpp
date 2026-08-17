@@ -134,6 +134,37 @@ void* s_setInputLayoutAddress = nullptr;
 void* s_createInputLayoutAddress = nullptr;
 void* s_createPixelShaderAddress = nullptr;
 void* s_setPixelShaderAddress = nullptr;
+void* s_createRasterizerStateAddress = nullptr;
+void* s_setRasterizerStateAddress = nullptr;
+
+using CreateRasterizerStateFn = HRESULT(__stdcall*)(
+    void*, const D3D11_RASTERIZER_DESC*, ID3D11RasterizerState**);
+using RSSetStateFn = void(__stdcall*)(void*, ID3D11RasterizerState*);
+
+CreateRasterizerStateFn s_origCreateRasterizerState = nullptr;
+RSSetStateFn s_origSetRasterizerState = nullptr;
+
+// The winding and cull mode of every rasterizer state the engine created.
+//
+// D3D11 offers no way to read a D3D11_RASTERIZER_DESC back off an
+// ID3D11RasterizerState, so creation is the only moment it is visible -- the
+// same reason CreateInputLayout has to be hooked for vertex formats.
+struct DescribedRasterizer
+{
+    std::atomic<std::uintptr_t> state{};
+    bool frontCounterClockwise{};
+    std::uint32_t cullMode{};
+};
+
+constexpr std::size_t kMaximumRasterizerStates = 512;
+std::array<DescribedRasterizer, kMaximumRasterizerStates> s_rasterizerStates{};
+std::atomic<std::uint32_t> s_rasterizerStateCount{};
+std::atomic<std::uint64_t> s_rasterizerStateOverflow{};
+
+// The state bound on this thread, already resolved. Draws outnumber state
+// changes by a wide margin, so the table walk is paid per bind.
+thread_local bool t_frontCounterClockwise = false;
+thread_local std::uint32_t t_cullMode = renderer::drawstream::kCullModeUnknown;
 void* s_setVsConstantBuffersAddress = nullptr;
 void* s_setPsConstantBuffersAddress = nullptr;
 void* s_mapAddress = nullptr;
@@ -875,6 +906,8 @@ void RecordDraw(
     record.indexOffset = t_currentIndexOffset;
     record.hasTransform = t_transformFresh;
     record.baseColorTexture = CurrentBaseColorTexture();
+    record.frontCounterClockwise = t_frontCounterClockwise;
+    record.cullMode = t_cullMode;
     t_transformFresh = false;
     std::memcpy(record.model, t_lastTransform, sizeof(record.model));
 }
@@ -1165,6 +1198,68 @@ void __stdcall HookedSetInputLayout(void* self, void* layout) noexcept
     s_origSetInputLayout(self, layout);
 }
 
+HRESULT __stdcall HookedCreateRasterizerState(
+    void* self,
+    const D3D11_RASTERIZER_DESC* desc,
+    ID3D11RasterizerState** state) noexcept
+{
+    const auto result = s_origCreateRasterizerState(self, desc, state);
+    // Recorded only once the object exists, so the table never names an
+    // address the runtime did not return.
+    if (FAILED(result) || desc == nullptr || state == nullptr ||
+        *state == nullptr) {
+        return result;
+    }
+    auto slot = s_rasterizerStateCount.load(std::memory_order_relaxed);
+    if (slot >= kMaximumRasterizerStates ||
+        !s_rasterizerStateCount.compare_exchange_strong(slot, slot + 1,
+            std::memory_order_relaxed)) {
+        s_rasterizerStateOverflow.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
+    auto& entry = s_rasterizerStates[slot];
+    entry.frontCounterClockwise = desc->FrontCounterClockwise != FALSE;
+    entry.cullMode = static_cast<std::uint32_t>(desc->CullMode);
+    // Published last: a reader that sees the address sees the fields.
+    entry.state.store(reinterpret_cast<std::uintptr_t>(*state),
+        std::memory_order_release);
+    return result;
+}
+
+void __stdcall HookedSetRasterizerState(
+    void* self,
+    ID3D11RasterizerState* state) noexcept
+{
+    // A null state restores D3D11's default, which is back-face culling with
+    // clockwise front faces -- not "no culling", and not "keep the last one".
+    if (state == nullptr) {
+        t_frontCounterClockwise = false;
+        t_cullMode = renderer::drawstream::kCullModeBack;
+    } else {
+        const auto handle = reinterpret_cast<std::uintptr_t>(state);
+        auto found = false;
+        const auto count = std::min<std::size_t>(
+            s_rasterizerStateCount.load(std::memory_order_relaxed),
+            kMaximumRasterizerStates);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& entry = s_rasterizerStates[index];
+            if (entry.state.load(std::memory_order_acquire) != handle) continue;
+            t_frontCounterClockwise = entry.frontCounterClockwise;
+            t_cullMode = entry.cullMode;
+            found = true;
+            break;
+        }
+        if (!found) {
+            // Created before the hook was installed. Left unknown rather than
+            // guessed, so the assembler can tell "no state seen" from "state
+            // seen and it said clockwise".
+            t_frontCounterClockwise = false;
+            t_cullMode = renderer::drawstream::kCullModeUnknown;
+        }
+    }
+    s_origSetRasterizerState(self, state);
+}
+
 // Per thread, for the same reason the vertex buffer is: a draw shades with
 // whatever shader is bound when it runs, and the engine submits from more
 // than one thread.
@@ -1249,8 +1344,12 @@ bool PrepareHooks(
     void* const setPsConstantBuffers,
     void* const createPixelShader,
     void* const updateSubresource,
-    void* const setPixelShader) noexcept
+    void* const setPixelShader,
+    void* const createRasterizerState,
+    void* const setRasterizerState) noexcept
 {
+    s_createRasterizerStateAddress = createRasterizerState;
+    s_setRasterizerStateAddress = setRasterizerState;
     s_updateSubresourceAddress = updateSubresource;
     s_setPixelShaderAddress = setPixelShader;
     s_setInputLayoutAddress = setInputLayout;
@@ -1411,7 +1510,12 @@ bool Install() noexcept
     // read it differently, so the numbers alone do not identify a field.
     if (s_createPixelShaderAddress == nullptr ||
         s_updateSubresourceAddress == nullptr ||
-        s_setPixelShaderAddress == nullptr) {
+        s_setPixelShaderAddress == nullptr ||
+        // Required, not optional: without the engine.s own rasterizer state
+        // the stream has to assume a winding, and assuming it renders every
+        // model inside out.
+        s_createRasterizerStateAddress == nullptr ||
+        s_setRasterizerStateAddress == nullptr) {
         return false;
     }
     if (MH_CreateHook(s_createInputLayoutAddress,
@@ -1426,6 +1530,12 @@ bool Install() noexcept
         MH_CreateHook(s_setPixelShaderAddress,
             reinterpret_cast<void*>(&HookedSetPixelShader),
             reinterpret_cast<void**>(&s_origSetPixelShader)) != MH_OK ||
+        MH_CreateHook(s_createRasterizerStateAddress,
+            reinterpret_cast<void*>(&HookedCreateRasterizerState),
+            reinterpret_cast<void**>(&s_origCreateRasterizerState)) != MH_OK ||
+        MH_CreateHook(s_setRasterizerStateAddress,
+            reinterpret_cast<void*>(&HookedSetRasterizerState),
+            reinterpret_cast<void**>(&s_origSetRasterizerState)) != MH_OK ||
         MH_CreateHook(s_setInputLayoutAddress,
             reinterpret_cast<void*>(&HookedSetInputLayout),
             reinterpret_cast<void**>(&s_origSetInputLayout)) != MH_OK ||
@@ -1459,6 +1569,8 @@ bool Install() noexcept
     if (MH_EnableHook(s_createPixelShaderAddress) != MH_OK ||
         MH_EnableHook(s_updateSubresourceAddress) != MH_OK ||
         MH_EnableHook(s_setPixelShaderAddress) != MH_OK ||
+        MH_EnableHook(s_createRasterizerStateAddress) != MH_OK ||
+        MH_EnableHook(s_setRasterizerStateAddress) != MH_OK ||
         MH_EnableHook(s_drawIndexedAddress) != MH_OK ||
         MH_EnableHook(s_drawIndexedInstancedAddress) != MH_OK ||
         MH_EnableHook(s_setVertexBuffersAddress) != MH_OK ||

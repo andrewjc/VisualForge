@@ -842,3 +842,62 @@ TEST_CASE("PLS_assembly_counts_which_vertices_brought_their_own_normal",
         CHECK(assembly.verticesWithoutNormals == 3);
     }
 }
+
+TEST_CASE("P20_assembly_takes_its_winding_from_the_engine_not_a_constant",
+    "[drawstream][phase20]")
+{
+    // The mirror declared counter-clockwise front faces for every mesh, which
+    // is the opposite of D3D11's default and drew every model inside out: the
+    // near faces were culled and the far interior kept. The winding has to
+    // come from the rasterizer state the engine bound.
+    const std::array<float, 9> positions{
+        0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const std::array<vf::renderer::mesh::InputElementDesc, 1> elements{{
+        {"POSITION", 0, vf::renderer::mesh::kFormatR32G32B32Float, 0, 0}}};
+
+    const auto assembleWith = [&](const bool frontCounterClockwise) {
+        scene::ScenePacket packet{};
+        packet.header.frameId = 1;
+        packet.header.viewId = 1;
+        scene::OpaqueObjectV1 object{};
+        object.objectId = 0x1234;
+        object.materialId = 0x5678;
+        object.flags = scene::ObjectWritesWorldTarget | scene::ObjectStatic;
+        object.boundsMinimum[0] = -1.0f;
+        object.boundsMaximum[0] = 1.0f;
+        object.model[0] = 1.0f;
+        object.model[5] = 1.0f;
+        object.model[10] = 1.0f;
+        object.model[15] = 1.0f;
+        object.geometricNormal[2] = 1.0f;
+        object.shadingNormal[2] = 1.0f;
+        packet.objects.push_back(object);
+
+        drawstream::AssembledMesh held{};
+        held.identity = object.objectId;
+        held.vertexStride = 12;
+        REQUIRE(vf::renderer::mesh::BuildLayoutFromInputElements(
+            elements, 12, 0, held.layout) ==
+            vf::renderer::mesh::VertexLayoutError::None);
+        held.vertices = std::as_bytes(std::span{positions});
+        held.indices = indices;
+        held.frontCounterClockwise = frontCounterClockwise;
+        const std::array<drawstream::AssembledMesh, 1> cache{held};
+
+        raster::DecodedPacket rasterPacket{};
+        drawstream::AssemblyResult assembly{};
+        REQUIRE(drawstream::AssembleSceneGeometry(packet, cache, rasterPacket,
+            assembly) == drawstream::DrawStreamError::None);
+        REQUIRE(rasterPacket.draws.size() == 1);
+        return rasterPacket.draws.front().frontFace;
+    };
+
+    // Both directions, so neither can be produced by a constant. A single
+    // case would pass against a hardcoded value half the time, which is
+    // exactly how the original defect survived.
+    CHECK(assembleWith(true) == raster::FrontFace::CounterClockwise);
+    CHECK(assembleWith(false) == raster::FrontFace::Clockwise);
+}
