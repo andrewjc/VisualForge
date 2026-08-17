@@ -450,6 +450,116 @@ TEST_CASE("malformed shader bytecode is refused rather than parsed")
     }
 }
 
+TEST_CASE("the base-colour texture slot is chosen from the shader's own names")
+{
+    // Every name and slot below was measured from Fallout 4 1.11.221's own
+    // pixel shaders, not invented -- see the renderer-reflect-resource lines
+    // in the live log. The engine's material path declares its textures as an
+    // array `tex[N]` bound at register N, and index 0 is the base colour;
+    // some techniques declare a lone scalar `tex` at slot 0 instead.
+    const auto slotOf = [](const std::vector<ResourceSpec>& resources)
+        -> std::pair<bool, std::uint32_t> {
+        const auto bytecode = BuildShader({}, 5, resources);
+        ReflectedShader reflection{};
+        REQUIRE(ReflectShader(bytecode, reflection) == ReflectionError::None);
+        std::uint32_t slot = 0xFFFFFFFFu;
+        const auto found = FindBaseColorTextureSlot(reflection, slot);
+        return {found, slot};
+    };
+
+    SECTION("the material array's element zero is the base colour")
+    {
+        // The general opaque/family path: four textures, and the one that
+        // matters is index 0. Deliberately listed out of order, because the
+        // table's order is the compiler's business and picking the first
+        // texture entry would be right here only by accident.
+        const auto [found, slot] = slotOf({
+            {"tex[2]", kSitTexture, 2},
+            {"tex[0]", kSitTexture, 0},
+            {"tex[1]", kSitTexture, 1},
+            {"sampler_tex[0]", kSitSampler, 0},
+        });
+        CHECK(found);
+        CHECK(slot == 0);
+    }
+
+    SECTION("a lone scalar tex is the base colour too")
+    {
+        const auto [found, slot] = slotOf({
+            {"tex", kSitTexture, 1},
+            {"sampler_tex", kSitSampler, 1},
+        });
+        CHECK(found);
+        CHECK(slot == 1);
+    }
+
+    SECTION("the declared slot is used, not the array index")
+    {
+        // Name and register are separate facts. A shader is free to bind
+        // tex[0] somewhere other than register 0, and trusting the digit in
+        // the name rather than the reflected bindPoint would sample whatever
+        // else the engine left at register 0.
+        const auto [found, slot] = slotOf({{"tex[0]", kSitTexture, 5}});
+        CHECK(found);
+        CHECK(slot == 5);
+    }
+
+    SECTION("a shader with no material texture is refused, not defaulted")
+    {
+        // The volumetric-lighting shaders declare tGodraysBuffer, tSceneDepth
+        // and friends -- real textures, none of them a material base colour.
+        // Answering "slot 0" for these would attach a depth buffer to a
+        // material as though it were albedo.
+        const auto [found, slot] = slotOf({
+            {"tGodraysBuffer", kSitTexture, 0},
+            {"tSceneDepth", kSitTexture, 1},
+            {"tPhaseLUT", kSitTexture, 4},
+        });
+        CHECK_FALSE(found);
+        CHECK(slot == 0xFFFFFFFFu);
+    }
+
+    SECTION("a sampler named like the texture is not mistaken for one")
+    {
+        // sampler_tex[0] shares the name and the register with tex[0]. Only
+        // the texture is a texture; matching on the name alone would pick
+        // whichever of the pair the compiler happened to emit first.
+        const auto [found, slot] = slotOf({
+            {"sampler_tex[0]", kSitSampler, 0},
+            {"tex[0]", kSitTexture, 3},
+        });
+        CHECK(found);
+        CHECK(slot == 3);
+    }
+
+    SECTION("a sampler named exactly tex is not a texture")
+    {
+        // `SamplerState tex : register(s0);` is legal HLSL, and a shader may
+        // declare one without any texture of that name. Matching on the name
+        // alone would hand back a *sampler* register as though it were a
+        // shader-resource slot, and the texture read at that index would be
+        // whatever unrelated resource the engine had left there.
+        //
+        // This is the case that makes the texture/sampler discrimination
+        // load-bearing: the sampler names seen in the live dump are all
+        // `sampler_`-prefixed, so every other fixture here is rejected by the
+        // name rule before the kind rule is ever consulted.
+        const auto [found, slot] = slotOf({
+            {"tex", kSitSampler, 0},
+            {"tGodraysBuffer", kSitTexture, 1},
+        });
+        CHECK_FALSE(found);
+        CHECK(slot == 0xFFFFFFFFu);
+    }
+
+    SECTION("a shader with no resources at all is refused")
+    {
+        const auto [found, slot] = slotOf({});
+        CHECK_FALSE(found);
+        CHECK(slot == 0xFFFFFFFFu);
+    }
+}
+
 TEST_CASE("a shader names its own bound textures and samplers")
 {
     // The constant-buffer work found the sun, but it could not find which PS

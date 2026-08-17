@@ -475,7 +475,8 @@ bool Install()
         contextVtable[12], contextVtable[20], contextVtable[18],
         contextVtable[19], contextVtable[7], contextVtable[14],
         contextVtable[15], contextVtable[17], deviceVtable[11],
-        contextVtable[16], deviceVtable[15], contextVtable[48]));
+        contextVtable[16], deviceVtable[15], contextVtable[48],
+        contextVtable[9]));
 
     context->Release();
     device->Release();

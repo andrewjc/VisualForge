@@ -47,6 +47,16 @@ struct DrawRecordV1
     // and would otherwise inherit whatever world matrix the previous world
     // draw left behind, placing a screen-space quad somewhere in the cell.
     bool hasTransform{true};
+    // The engine texture this draw shaded its base colour from, or zero when
+    // none was resolved. Zero is a real answer, not a failure: most draws in
+    // a frame are not material draws, and the shader bound for a post or
+    // godray pass declares textures that are nobody's albedo.
+    //
+    // Resolved through the *shader*, never from a fixed slot: which
+    // pixel-shader resource register carries base colour is a property of the
+    // technique bound at the time, exactly as the lighting constant's offset
+    // was a property of the shader that declared it.
+    std::uint64_t baseColorTexture{};
     // Row-major 4x4, exactly as the vertex-shader constant buffer holds it.
     float model[16]{};
 };

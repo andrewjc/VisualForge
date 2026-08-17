@@ -531,6 +531,25 @@ bool BuildLiveSceneGeometry(
     frame.droppedDraws = dropped;
     frame.draws.assign(recorded.begin(), recorded.begin() + count);
 
+    // How much of the *mirrored* frame carries a base-colour texture, as
+    // opposed to how much of the engine's whole draw stream does. The two are
+    // very different populations: the mirror keeps only world geometry, and a
+    // resolution rate measured over every draw the engine makes says nothing
+    // about whether the objects actually drawn here have one.
+    {
+        std::uint64_t withTexture = 0;
+        for (std::size_t index = 0; index < count; ++index) {
+            if (recorded[index].baseColorTexture != 0) ++withTexture;
+        }
+        static std::uint64_t s_lastWithTexture = 0xFFFF'FFFF'FFFF'FFFFull;
+        if (withTexture != s_lastWithTexture) {
+            log::Write("renderer-drawtex: draws=%llu with-texture=%llu",
+                static_cast<unsigned long long>(count),
+                static_cast<unsigned long long>(withTexture));
+            s_lastWithTexture = withTexture;
+        }
+    }
+
     scene::ScenePacket scenePacket{};
     if (drawstream::TranslateDrawStream(frame, {}, scenePacket, translated) !=
         drawstream::DrawStreamError::None) {
@@ -934,6 +953,25 @@ bool BuildLiveSceneGeometry(
             static_cast<unsigned long long>(constants.psBinds),
             static_cast<unsigned long long>(constants.psDescribed),
             static_cast<unsigned long long>(constants.psSampled));
+        // Whether a draw's base-colour texture is being resolved at all, and
+        // where it stops if not. `notices` at zero means nothing is forwarding
+        // pixel-shader bindings; `shaders-with-base` at zero means the
+        // reflection never matched a material texture; `draws-missing` against
+        // a healthy `draws-with` means the slot rule is finding a register the
+        // engine leaves empty. One number could not separate those.
+        log::Write("renderer-basecolor: notices=%llu shaders=%u "
+            "shaders-with-base=%u draws-with=%llu draws-missing=%llu "
+            "no-shader=%llu shader-unknown=%llu shader-no-base=%llu "
+            "by-convention=%llu ps-shader-binds=%llu",
+            static_cast<unsigned long long>(constants.psResourceNotices),
+            constants.shadersDescribed, constants.shadersWithBaseColor,
+            static_cast<unsigned long long>(constants.drawsWithBaseColor),
+            static_cast<unsigned long long>(constants.drawsMissingBaseColor),
+            static_cast<unsigned long long>(constants.drawsNoShader),
+            static_cast<unsigned long long>(constants.drawsShaderUnknown),
+            static_cast<unsigned long long>(constants.drawsShaderNoBase),
+            static_cast<unsigned long long>(constants.drawsConventionBaseColor),
+            static_cast<unsigned long long>(constants.psShaderBinds));
         // Every pixel-shader constant buffer the engine bound, by size and by
         // how often it was rewritten. A per-frame block is written once a
         // frame; a per-draw block is written thousands of times. That ratio is

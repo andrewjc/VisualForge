@@ -134,7 +134,8 @@ struct LayoutStats
     void* createInputLayout,
     void* setPsConstantBuffers,
     void* createPixelShader,
-    void* updateSubresource) noexcept;
+    void* updateSubresource,
+    void* setPixelShader) noexcept;
 
 // A constant buffer as the shader that uses it declares it.
 //
@@ -194,6 +195,22 @@ constexpr std::size_t kShaderResourceCapacity = 128;
 [[nodiscard]] std::size_t CopyShaderResourceBindings(
     ShaderResourceBinding* destination,
     std::size_t capacity) noexcept;
+
+// Publishes the pixel-shader resource views the engine just bound.
+//
+// Called from the texture capture's own PSSetShaderResources hook rather than
+// from a hook of ours: MinHook allows one hook per target address, that module
+// prepares its hooks first, and the live harness arms it on every run. Two
+// modules cannot both own slot 8, so the one that already has it forwards to
+// the one that needs the data. A run with draw capture but no texture capture
+// therefore sees no bindings at all -- which resolves every draw to "no
+// texture" and shades from base colour, the same as any draw whose shader
+// declares none. `ConstantStats::psResourceNotices` is how that case is told
+// apart from "the hook ran and found nothing".
+void NotePixelShaderResources(
+    std::uint32_t startSlot,
+    std::uint32_t count,
+    void* const* views) noexcept;
 
 // Why the catalogue looks the way it does. `shaders` at zero means the hook
 // was installed after the engine compiled its shaders, which is a different
@@ -271,6 +288,31 @@ struct ConstantStats
     std::uint64_t psBinds{};
     std::uint64_t psDescribed{};
     std::uint64_t psSampled{};
+    // Calls to NotePixelShaderResources. Zero means nothing is forwarding
+    // bindings -- the texture capture module was not armed this run -- which
+    // is a different problem from bindings arriving and resolving to nothing.
+    std::uint64_t psResourceNotices{};
+    // Draws that resolved a base-colour texture, and draws whose bound shader
+    // declared one but had nothing bound at that register. The second number
+    // separates "this technique has no albedo" from "it does and we missed
+    // it".
+    std::uint64_t drawsWithBaseColor{};
+    std::uint64_t drawsMissingBaseColor{};
+    // Why a draw resolved nothing. A shader absent from the reflection table
+    // carried no reflection chunk to read; one present but without a material
+    // texture is a post or volumetric pass.
+    std::uint64_t drawsNoShader{};
+    std::uint64_t drawsShaderUnknown{};
+    std::uint64_t drawsShaderNoBase{};
+    // Draws textured from register 0 by Bethesda's convention because their
+    // shader shipped stripped of reflection. Kept apart from
+    // drawsWithBaseColor so a measured resolution is never reported as though
+    // it were the shader's own word.
+    std::uint64_t drawsConventionBaseColor{};
+    std::uint64_t psShaderBinds{};
+    // Distinct pixel shaders whose reflection resolved a base-colour slot.
+    std::uint32_t shadersWithBaseColor{};
+    std::uint32_t shadersDescribed{};
 };
 
 [[nodiscard]] ConstantStats ConstantCounters() noexcept;

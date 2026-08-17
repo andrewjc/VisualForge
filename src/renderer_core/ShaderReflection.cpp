@@ -219,6 +219,25 @@ try {
     return ReflectionError::TruncatedChunk;
 }
 
+bool FindBaseColorTextureSlot(
+    const ReflectedShader& reflection, std::uint32_t& slot) noexcept
+{
+    for (const auto& resource : reflection.resources) {
+        // Textures only. `sampler_tex[0]` shares both the name stem and the
+        // register with `tex[0]`, so a name match alone picks whichever the
+        // compiler happened to emit first.
+        if (resource.kind != ResourceKind::Texture) {
+            continue;
+        }
+        if (resource.name != "tex[0]" && resource.name != "tex") {
+            continue;
+        }
+        slot = resource.bindPoint;
+        return true;
+    }
+    return false;
+}
+
 const char* ToString(const ReflectionError error) noexcept
 {
     switch (error) {

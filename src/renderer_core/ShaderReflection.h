@@ -85,6 +85,26 @@ struct ReflectedShader
     std::span<const std::byte> bytecode,
     ReflectedShader& reflection) noexcept;
 
+// Finds the register a shader's base-colour texture binds to, from the
+// shader's own declarations. False when this shader declares no material
+// texture at all, which is the common case: the post, godray and volumetric
+// passes bind real textures that are not anybody's albedo, and answering
+// "slot 0" for those would attach a depth buffer to a material.
+//
+// The rule is measured, not assumed. Fallout 4 1.11.221's material shaders
+// declare their textures as an array `tex[N]` bound at register N, with index
+// 0 the base colour; some techniques declare a lone scalar `tex` instead.
+// Both forms appear in the live reflection dump, `tex[0]` across 150 distinct
+// pixel shaders and `tex` across 144 -- by far the two largest texture
+// populations in the game.
+//
+// The register comes from the reflected bind point, never from the digit in
+// the name: the two are separate facts and a shader may bind `tex[0]`
+// anywhere.
+[[nodiscard]] bool FindBaseColorTextureSlot(
+    const ReflectedShader& reflection,
+    std::uint32_t& slot) noexcept;
+
 [[nodiscard]] const char* ToString(ReflectionError error) noexcept;
 
 }

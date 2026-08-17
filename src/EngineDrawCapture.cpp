@@ -58,6 +58,11 @@ thread_local std::uint32_t t_currentIndexOffset = 0;
 // the result as an invalid affine. The transform is read only from the
 // buffer the draw will actually read it from.
 thread_local std::uintptr_t t_vsConstantSlot0 = 0;
+// The pixel shader bound on this thread. Which shader is active decides what
+// the pixel-shader resource slots *mean*: the engine has no fixed convention
+// for which slot carries a draw's base colour, so "the texture at slot 0" is
+// only an answer once the shader that declared slot 0 is known.
+thread_local std::uintptr_t t_currentPixelShader = 0;
 // Set when the engine writes a matrix-sized constant buffer, cleared when a
 // draw consumes it. Per-draw constant buffers are written immediately before
 // the draw that reads them, so a draw with a fresh write is world geometry
@@ -98,6 +103,8 @@ using CreateInputLayoutFn = HRESULT(__stdcall*)(
     ID3D11InputLayout**);
 using CreatePixelShaderFn = HRESULT(__stdcall*)(
     void*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11PixelShader**);
+using SetPixelShaderFn = void(__stdcall*)(
+    void*, ID3D11PixelShader*, ID3D11ClassInstance* const*, UINT);
 using MapFn = HRESULT(__stdcall*)(
     void*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 using UpdateSubresourceFn = void(__stdcall*)(
@@ -110,6 +117,7 @@ SetIndexBufferFn s_origSetIndexBuffer = nullptr;
 SetInputLayoutFn s_origSetInputLayout = nullptr;
 CreateInputLayoutFn s_origCreateInputLayout = nullptr;
 CreatePixelShaderFn s_origCreatePixelShader = nullptr;
+SetPixelShaderFn s_origSetPixelShader = nullptr;
 SetConstantBuffersFn s_origSetVsConstantBuffers = nullptr;
 SetConstantBuffersFn s_origSetPsConstantBuffers = nullptr;
 MapFn s_origMap = nullptr;
@@ -122,6 +130,7 @@ void* s_setIndexBufferAddress = nullptr;
 void* s_setInputLayoutAddress = nullptr;
 void* s_createInputLayoutAddress = nullptr;
 void* s_createPixelShaderAddress = nullptr;
+void* s_setPixelShaderAddress = nullptr;
 void* s_setVsConstantBuffersAddress = nullptr;
 void* s_setPsConstantBuffersAddress = nullptr;
 void* s_mapAddress = nullptr;
@@ -184,6 +193,56 @@ std::array<ShaderResourceBinding, kShaderResourceCapacity> s_shaderResources{};
 std::uint32_t s_shaderResourceCount = 0;
 std::atomic<std::uint32_t> s_shaderResourceOverflow{};
 
+// No base-colour texture. Distinct from slot 0, which is a real register.
+constexpr std::uint32_t kNoBaseColorSlot = 0xFFFF'FFFFu;
+
+// Which register each created pixel shader binds its base colour at, resolved
+// once from that shader's own reflection at creation time. Storing the answer
+// rather than the whole resource list: the question asked per draw is only
+// ever "which register", and doing the name matching once at creation keeps
+// it off the render thread entirely.
+//
+// Open-addressed and a power of two, for the same reason the pixel-shader
+// constant table is: the engine creates thousands of these and a linear scan
+// would be paid on every draw.
+constexpr std::size_t kMaximumDescribedShaders = 8192;
+
+struct DescribedShader
+{
+    std::atomic<std::uintptr_t> handle{};
+    std::uint32_t baseColorSlot{kNoBaseColorSlot};
+};
+
+std::array<DescribedShader, kMaximumDescribedShaders> s_describedShaders{};
+std::atomic<std::uint32_t> s_shadersDescribed{};
+std::atomic<std::uint32_t> s_shadersWithBaseColor{};
+
+// Only the low registers are tracked. D3D11 allows 128 shader-resource slots
+// per stage, but a material's textures live in the first handful, and a table
+// this size is a single cache line's worth of pointers per thread.
+constexpr std::size_t kTrackedPixelShaderSlots = 16;
+thread_local void* t_pixelShaderResources[kTrackedPixelShaderSlots] = {};
+std::atomic<std::uint64_t> s_psResourceNotices{};
+std::atomic<std::uint64_t> s_drawsWithBaseColor{};
+std::atomic<std::uint64_t> s_drawsMissingBaseColor{};
+std::atomic<std::uint64_t> s_drawsNoShader{};
+std::atomic<std::uint64_t> s_drawsShaderUnknown{};
+std::atomic<std::uint64_t> s_drawsShaderNoBase{};
+std::atomic<std::uint64_t> s_drawsConventionBaseColor{};
+std::atomic<std::uint64_t> s_psShaderBinds{};
+
+// A view the engine bound, and the resource behind it. GetResource is a
+// vtable call that also touches the reference count, so it is paid once per
+// distinct view rather than once per draw.
+struct ResolvedView
+{
+    std::atomic<std::uintptr_t> view{};
+    std::uintptr_t resource{};
+};
+
+constexpr std::size_t kMaximumResolvedViews = 8192;
+std::array<ResolvedView, kMaximumResolvedViews> s_resolvedViews{};
+
 void CopyName(char (&destination)[64], const std::string& source) noexcept
 {
     const std::size_t length = std::min(source.size(), sizeof(destination) - 1);
@@ -191,12 +250,16 @@ void CopyName(char (&destination)[64], const std::string& source) noexcept
     destination[length] = '\0';
 }
 
+void DescribeShader(std::uintptr_t handle, std::uint32_t baseColorSlot) noexcept;
+
 // Folds one shader's declarations into the catalogue. A buffer already present
 // under the same name and width has its shader count raised rather than being
 // stored twice: what distinguishes engine-wide state from a technique's own
 // constants is how many techniques declare it.
 void RecordShaderReflection(
-    const void* const bytecode, const SIZE_T length) noexcept
+    const void* const bytecode,
+    const SIZE_T length,
+    const std::uintptr_t shaderHandle) noexcept
 {
     s_shadersSeen.fetch_add(1, std::memory_order_relaxed);
     if (bytecode == nullptr || length == 0) {
@@ -213,6 +276,17 @@ void RecordShaderReflection(
         return;
     }
     s_shadersReflected.fetch_add(1, std::memory_order_relaxed);
+
+    // Resolved here, once, rather than per draw: the answer is a property of
+    // the shader and this runs at creation time, off the render thread.
+    {
+        std::uint32_t baseColorSlot = 0;
+        if (!renderer::shader::FindBaseColorTextureSlot(
+                reflection, baseColorSlot)) {
+            baseColorSlot = kNoBaseColorSlot;
+        }
+        DescribeShader(shaderHandle, baseColorSlot);
+    }
 
     const std::lock_guard<std::mutex> guard{s_reflectionMutex};
     for (const auto& buffer : reflection.buffers) {
@@ -287,7 +361,10 @@ HRESULT __stdcall HookedCreatePixelShader(
 {
     const auto result = s_origCreatePixelShader(self, bytecode, length, linkage, shader);
     if (SUCCEEDED(result)) {
-        RecordShaderReflection(bytecode, length);
+        RecordShaderReflection(bytecode, length,
+            shader != nullptr
+                ? reinterpret_cast<std::uintptr_t>(*shader)
+                : std::uintptr_t{0});
     }
     return result;
 }
@@ -408,6 +485,167 @@ void DescribePsConstant(ID3D11Buffer* const buffer) noexcept
     entry->cpuAccessFlags = desc.CPUAccessFlags;
     entry->bindFlags = desc.BindFlags;
     entry->byteWidth = desc.ByteWidth;
+}
+
+// Stores a shader's resolved base-colour register. Called once per created
+// pixel shader, off the render thread.
+void DescribeShader(
+    const std::uintptr_t handle, const std::uint32_t baseColorSlot) noexcept
+{
+    if (handle == 0) return;
+    const std::size_t mask = s_describedShaders.size() - 1;
+    std::size_t index = static_cast<std::size_t>(handle >> 4) & mask;
+    for (std::size_t step = 0; step <= mask; ++step) {
+        auto& entry = s_describedShaders[index];
+        const auto existing = entry.handle.load(std::memory_order_acquire);
+        if (existing == handle) return;
+        if (existing == 0) {
+            std::uintptr_t expected = 0;
+            if (entry.handle.compare_exchange_strong(expected, handle,
+                    std::memory_order_acq_rel)) {
+                entry.baseColorSlot = baseColorSlot;
+                s_shadersDescribed.fetch_add(1, std::memory_order_relaxed);
+                if (baseColorSlot != kNoBaseColorSlot) {
+                    s_shadersWithBaseColor.fetch_add(1, std::memory_order_relaxed);
+                }
+                return;
+            }
+            if (expected == handle) return;
+        }
+        index = (index + 1) & mask;
+    }
+}
+
+// The register this shader binds its base colour at, or kNoBaseColorSlot when
+// the shader was never described or declares no material texture.
+[[nodiscard]] std::uint32_t FindShaderBaseColorSlot(
+    const std::uintptr_t handle) noexcept
+{
+    if (handle == 0) return kNoBaseColorSlot;
+    const std::size_t mask = s_describedShaders.size() - 1;
+    std::size_t index = static_cast<std::size_t>(handle >> 4) & mask;
+    for (std::size_t step = 0; step <= mask; ++step) {
+        const auto& entry = s_describedShaders[index];
+        const auto existing = entry.handle.load(std::memory_order_acquire);
+        if (existing == handle) return entry.baseColorSlot;
+        if (existing == 0) return kNoBaseColorSlot;
+        index = (index + 1) & mask;
+    }
+    return kNoBaseColorSlot;
+}
+
+// Whether this shader was ever described at all. Distinct from "described
+// and has no base colour": a shader absent from the table is one whose
+// bytecode carried no reflection to read.
+[[nodiscard]] bool FindShaderDescribed(const std::uintptr_t handle) noexcept
+{
+    if (handle == 0) return false;
+    const std::size_t mask = s_describedShaders.size() - 1;
+    std::size_t index = static_cast<std::size_t>(handle >> 4) & mask;
+    for (std::size_t step = 0; step <= mask; ++step) {
+        const auto& entry = s_describedShaders[index];
+        const auto existing = entry.handle.load(std::memory_order_acquire);
+        if (existing == handle) return true;
+        if (existing == 0) return false;
+        index = (index + 1) & mask;
+    }
+    return false;
+}
+
+// The texture behind a bound view, cached so the COM call is paid once per
+// distinct view rather than once per draw.
+[[nodiscard]] std::uintptr_t ResolveViewResource(void* const view) noexcept
+{
+    if (view == nullptr) return 0;
+    const auto key = reinterpret_cast<std::uintptr_t>(view);
+    const std::size_t mask = s_resolvedViews.size() - 1;
+    std::size_t index = static_cast<std::size_t>(key >> 4) & mask;
+    for (std::size_t step = 0; step <= mask; ++step) {
+        auto& entry = s_resolvedViews[index];
+        const auto existing = entry.view.load(std::memory_order_acquire);
+        if (existing == key) return entry.resource;
+        if (existing == 0) {
+            ID3D11Resource* resource = nullptr;
+            static_cast<ID3D11ShaderResourceView*>(view)->GetResource(&resource);
+            if (resource == nullptr) return 0;
+            const auto identity = reinterpret_cast<std::uintptr_t>(resource);
+            // Released immediately: the pointer is used as an identity, not
+            // as a reference. Holding it would keep engine textures alive
+            // past the engine's own idea of their lifetime.
+            resource->Release();
+            std::uintptr_t expected = 0;
+            if (entry.view.compare_exchange_strong(expected, key,
+                    std::memory_order_acq_rel)) {
+                entry.resource = identity;
+                return identity;
+            }
+            if (expected == key) return entry.resource;
+        }
+        index = (index + 1) & mask;
+    }
+    return 0;
+}
+
+// The base-colour texture for a draw about to run on this thread, resolved
+// through the shader that will shade it.
+[[nodiscard]] std::uint64_t CurrentBaseColorTexture() noexcept
+{
+    // Three different reasons a draw resolves nothing, counted apart because
+    // they call for three different responses. A shader that was never
+    // described is one whose bytecode carried no reflection chunk -- Fallout 4
+    // ships most of its own shaders stripped -- and no amount of work further
+    // down this path will recover it. A shader that *was* described but
+    // declares no material texture is a post or volumetric pass, which is
+    // correct and expected. Only the third is a defect.
+    if (t_currentPixelShader == 0) {
+        s_drawsNoShader.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    auto slot = FindShaderBaseColorSlot(t_currentPixelShader);
+    auto byConvention = false;
+    if (slot == kNoBaseColorSlot) {
+        if (FindShaderDescribed(t_currentPixelShader)) {
+            // Described, and it declares no material texture. This is a post
+            // or volumetric pass and has no albedo to find; guessing one here
+            // would attach a depth buffer to a material.
+            s_drawsShaderNoBase.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
+        // The shader carried no reflection chunk. Measured live: 63% of the
+        // engine's draws are these, because Fallout 4 ships its own shaders
+        // stripped -- so refusing here would refuse essentially the whole
+        // world, and the reflection route alone cannot texture the mirror.
+        //
+        // Register 0 is Bethesda's own convention for the diffuse map, and it
+        // is what every reflected material shader here also does: `tex[0]` and
+        // the scalar `tex` both bind at 0 across 294 of the 316 shaders that
+        // declare one. That makes this a convention corroborated by every
+        // shader that can be read, not a guess -- but it is still not the
+        // shader's own word, so every draw resolved this way is counted
+        // separately and never mixed into the measured total.
+        s_drawsShaderUnknown.fetch_add(1, std::memory_order_relaxed);
+        slot = 0;
+        byConvention = true;
+    }
+    if (slot >= kTrackedPixelShaderSlots) {
+        s_drawsMissingBaseColor.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    const auto resource = ResolveViewResource(t_pixelShaderResources[slot]);
+    if (resource == 0) {
+        // The shader declares a base colour and nothing is bound where it
+        // said. Counted rather than ignored: this is the shape a wrong slot
+        // rule would take, and it has to be distinguishable from a technique
+        // that simply has no albedo.
+        s_drawsMissingBaseColor.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    if (byConvention) {
+        s_drawsConventionBaseColor.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        s_drawsWithBaseColor.fetch_add(1, std::memory_order_relaxed);
+    }
+    return static_cast<std::uint64_t>(resource);
 }
 
 // Records what was written into one pixel-shader constant buffer, tracking the
@@ -592,6 +830,7 @@ void RecordDraw(
     record.indexFormat = t_currentIndexFormat;
     record.indexOffset = t_currentIndexOffset;
     record.hasTransform = t_transformFresh;
+    record.baseColorTexture = CurrentBaseColorTexture();
     t_transformFresh = false;
     std::memcpy(record.model, t_lastTransform, sizeof(record.model));
 }
@@ -857,6 +1096,20 @@ void __stdcall HookedSetInputLayout(void* self, void* layout) noexcept
     s_origSetInputLayout(self, layout);
 }
 
+// Per thread, for the same reason the vertex buffer is: a draw shades with
+// whatever shader is bound when it runs, and the engine submits from more
+// than one thread.
+void __stdcall HookedSetPixelShader(
+    void* self,
+    ID3D11PixelShader* shader,
+    ID3D11ClassInstance* const* instances,
+    const UINT instanceCount) noexcept
+{
+    t_currentPixelShader = reinterpret_cast<std::uintptr_t>(shader);
+    s_psShaderBinds.fetch_add(1, std::memory_order_relaxed);
+    s_origSetPixelShader(self, shader, instances, instanceCount);
+}
+
 }
 
 bool FindInputLayout(
@@ -923,9 +1176,11 @@ bool PrepareHooks(
     void* const createInputLayout,
     void* const setPsConstantBuffers,
     void* const createPixelShader,
-    void* const updateSubresource) noexcept
+    void* const updateSubresource,
+    void* const setPixelShader) noexcept
 {
     s_updateSubresourceAddress = updateSubresource;
+    s_setPixelShaderAddress = setPixelShader;
     s_setInputLayoutAddress = setInputLayout;
     s_createInputLayoutAddress = createInputLayout;
     s_createPixelShaderAddress = createPixelShader;
@@ -974,6 +1229,30 @@ std::size_t CopyShaderBufferLayouts(
     return written;
 }
 
+void NotePixelShaderResources(
+    const std::uint32_t startSlot,
+    const std::uint32_t count,
+    void* const* const views) noexcept
+{
+    s_psResourceNotices.fetch_add(1, std::memory_order_relaxed);
+    if (views == nullptr) {
+        // A null array unbinds the whole range. Clearing rather than leaving
+        // the previous views in place: a draw that follows must resolve to
+        // "nothing bound", not to whatever the last technique left there.
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const auto slot = startSlot + index;
+            if (slot >= kTrackedPixelShaderSlots) break;
+            t_pixelShaderResources[slot] = nullptr;
+        }
+        return;
+    }
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto slot = startSlot + index;
+        if (slot >= kTrackedPixelShaderSlots) break;
+        t_pixelShaderResources[slot] = views[index];
+    }
+}
+
 std::size_t CopyShaderResourceBindings(
     ShaderResourceBinding* const destination,
     const std::size_t capacity) noexcept
@@ -1010,6 +1289,16 @@ ConstantStats ConstantCounters() noexcept
     ConstantStats stats{};
     stats.psBinds = s_psBinds.load(std::memory_order_relaxed);
     stats.psDescribeOverflow = s_psDescribeOverflow.load(std::memory_order_relaxed);
+    stats.psResourceNotices = s_psResourceNotices.load(std::memory_order_relaxed);
+    stats.drawsWithBaseColor = s_drawsWithBaseColor.load(std::memory_order_relaxed);
+    stats.drawsMissingBaseColor = s_drawsMissingBaseColor.load(std::memory_order_relaxed);
+    stats.drawsNoShader = s_drawsNoShader.load(std::memory_order_relaxed);
+    stats.drawsShaderUnknown = s_drawsShaderUnknown.load(std::memory_order_relaxed);
+    stats.drawsShaderNoBase = s_drawsShaderNoBase.load(std::memory_order_relaxed);
+    stats.drawsConventionBaseColor = s_drawsConventionBaseColor.load(std::memory_order_relaxed);
+    stats.psShaderBinds = s_psShaderBinds.load(std::memory_order_relaxed);
+    stats.shadersDescribed = s_shadersDescribed.load(std::memory_order_relaxed);
+    stats.shadersWithBaseColor = s_shadersWithBaseColor.load(std::memory_order_relaxed);
     stats.psSampled = s_psSampled.load(std::memory_order_relaxed);
     for (const auto& entry : s_describedPsConstant) {
         if (entry.handle.load(std::memory_order_acquire) != 0) {
@@ -1041,7 +1330,8 @@ bool Install() noexcept
     // a guess: the engine binds one wide block across techniques that each
     // read it differently, so the numbers alone do not identify a field.
     if (s_createPixelShaderAddress == nullptr ||
-        s_updateSubresourceAddress == nullptr) {
+        s_updateSubresourceAddress == nullptr ||
+        s_setPixelShaderAddress == nullptr) {
         return false;
     }
     if (MH_CreateHook(s_createInputLayoutAddress,
@@ -1053,6 +1343,9 @@ bool Install() noexcept
         MH_CreateHook(s_updateSubresourceAddress,
             reinterpret_cast<void*>(&HookedUpdateSubresource),
             reinterpret_cast<void**>(&s_origUpdateSubresource)) != MH_OK ||
+        MH_CreateHook(s_setPixelShaderAddress,
+            reinterpret_cast<void*>(&HookedSetPixelShader),
+            reinterpret_cast<void**>(&s_origSetPixelShader)) != MH_OK ||
         MH_CreateHook(s_setInputLayoutAddress,
             reinterpret_cast<void*>(&HookedSetInputLayout),
             reinterpret_cast<void**>(&s_origSetInputLayout)) != MH_OK ||
@@ -1085,6 +1378,7 @@ bool Install() noexcept
     }
     if (MH_EnableHook(s_createPixelShaderAddress) != MH_OK ||
         MH_EnableHook(s_updateSubresourceAddress) != MH_OK ||
+        MH_EnableHook(s_setPixelShaderAddress) != MH_OK ||
         MH_EnableHook(s_drawIndexedAddress) != MH_OK ||
         MH_EnableHook(s_drawIndexedInstancedAddress) != MH_OK ||
         MH_EnableHook(s_setVertexBuffersAddress) != MH_OK ||

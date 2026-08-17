@@ -1,4 +1,5 @@
 #include "EngineTextureCapture.h"
+#include "EngineDrawCapture.h"
 
 #include "Config.h"
 #include "Log.h"
@@ -583,6 +584,15 @@ void STDMETHODCALLTYPE HookedPSSetShaderResources(
     ID3D11ShaderResourceView* const* views)
 {
     s_state.psSetShaderResources(context, startSlot, viewCount, views);
+    // Forwarded before this module's own one-shot gate, and regardless of
+    // it: the draw capture needs every binding for the whole run, while the
+    // code below stops once a texture has been published. MinHook allows one
+    // hook per address and this module claims slot 8 first, so this is where
+    // the draw capture has to be told.
+    vf::engine_draw_capture::NotePixelShaderResources(
+        static_cast<std::uint32_t>(startSlot),
+        static_cast<std::uint32_t>(viewCount),
+        reinterpret_cast<void* const*>(views));
     if (s_state.captured.load(std::memory_order_acquire) || views == nullptr) {
         return;
     }

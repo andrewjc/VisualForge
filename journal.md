@@ -3303,3 +3303,60 @@ The CPU-side material/texture contract, independent of any of the above:
 non-sentinel `textureIndex` yet -- the mirror still shades every surface from
 `baseColor` alone, correctly, because that is what "no candidate found" is
 supposed to do.
+
+## Per-draw base-colour texture identity, and the wall reflection hits (2026-08-17)
+
+Steps 1-3 of the texture-library goal. `PSSetShader` (context slot 9) is
+hooked, each created pixel shader's base-colour register is resolved once from
+its own reflection at creation time, and every draw stamps the engine texture
+bound at that register into `DrawRecordV1::baseColorTexture`.
+
+`FindBaseColorTextureSlot` is the rule, unit-tested and mutation-tested: the
+material path declares `tex[0]` (or a scalar `tex`) and the register comes from
+the reflected bind point, never from the digit in the name. The texture/sampler
+discrimination is load-bearing and has a test that proves it -- a shader
+declaring `SamplerState tex` with no matching texture would otherwise hand back
+a sampler register as a shader-resource slot.
+
+### The measurement that changed the design
+
+The reflection route alone resolves almost nothing. Measured live, per draw:
+
+| outcome | draws | share |
+| --- | --- | --- |
+| shader carried no reflection chunk | 1,154,552 | 63% |
+| no pixel shader recorded at draw time | 664,902 | 36% |
+| described, declares no material texture | 4,581 | 0.25% |
+| resolved from the shader's own declaration | 2,564 | **0.14%** |
+
+The rule is *correct* where it applies -- `draws-missing=0` on that path, every
+draw whose shader named a base colour had one bound. It simply almost never
+applies: Fallout 4 ships 2393 of its 2818 pixel shaders stripped of reflection,
+and those are the ones that draw the world. This is the same wall the constant
+buffers hit, now measured against draw volume rather than shader count.
+
+So a second path was added, and **kept separate in every counter** rather than
+folded in: when a shader carried no reflection, register 0 is used by
+Bethesda's own convention for the diffuse map. That convention is corroborated
+by every shader that *can* be read -- `tex[0]` and the scalar `tex` both bind
+at register 0 across 294 of the 316 reflected shaders that declare one -- so it
+is a convention supported by all available evidence, not a guess. It is still
+not the shader's own word, which is why `by-convention` is reported as its own
+number and never added to `draws-with`.
+
+With both paths: **2,745 of 4,381 draws in a mirrored frame (63%) carry a
+resolved base-colour texture identity.** `draws-missing` is honestly non-zero
+(14,855 cumulative) where register 0 has nothing bound.
+
+### Still open
+
+`no-shader=518,148` -- 36% of draws see a null `t_currentPixelShader` despite
+`ps-shader-binds=92,051` proving the hook fires. Most likely the engine binds
+and draws from different threads, or replays command lists (which do not
+re-enter the vtable hooks). Not yet diagnosed; it is the next thing to
+understand, because it is the largest remaining population.
+
+An identity is not a texture. Nothing has been read back from the GPU yet:
+step 4, the always-on residency tracker, has not been started, so
+`textureIndex` is still the sentinel on every material and the mirror still
+shades from base colour alone.
