@@ -1201,51 +1201,20 @@ bool BuildLiveSceneGeometry(
         drawSet ^= one;
     }
     fold(drawSet);
-    // The materials are keyed apart from everything else.
-    //
-    // A material gaining a texture index changes forty-eight bytes of a
-    // sixty-six megabyte packet, and folding it into one key meant every such
-    // change re-encoded the whole thing. That is not rare: the library keeps
-    // gaining entries long after the geometry has settled, and those frames
-    // were the ones that pushed the steady state over its budget.
-    std::uint64_t materialSignature = 0xCBF2'9CE4'8422'2325ull;
+    std::uint64_t materialSet = 0;
     for (const auto& material : rasterPacket.materials) {
-        materialSignature = (materialSignature ^ material.resourceId) *
-            0x0000'0100'0000'01B3ull;
-        materialSignature = (materialSignature ^ material.textureIndex) *
-            0x0000'0100'0000'01B3ull;
+        std::uint64_t one = 0xCBF2'9CE4'8422'2325ull;
+        one = (one ^ material.resourceId) * 0x0000'0100'0000'01B3ull;
+        one = (one ^ material.textureIndex) * 0x0000'0100'0000'01B3ull;
+        materialSet ^= one;
     }
+    fold(materialSet);
     static std::uint64_t s_encodedSignature = 0;
-    static std::uint64_t s_encodedMaterialSignature = 0;
     static bool s_encodedValid = false;
-    // The structure is unchanged, so every section still sits where the header
-    // says and only the material bytes need replacing.
-    const auto structureHeld = s_encodedValid &&
+    const auto reuseEncoded = s_encodedValid &&
         contentSignature == s_encodedSignature &&
         packetBytes.size() >= sizeof(raster::PacketHeaderV1);
-    const auto reuseEncoded = structureHeld &&
-        materialSignature == s_encodedMaterialSignature;
-    // The materials moved but nothing else did, so they are written over their
-    // own section instead of re-encoding the packet around them. Forty-five
-    // kilobytes rather than sixty-six megabytes.
-    auto materialsPatched = false;
-    if (structureHeld && !reuseEncoded && !rasterPacket.materials.empty()) {
-        raster::PacketHeaderV1 existing{};
-        std::memcpy(&existing, packetBytes.data(), sizeof(existing));
-        const auto bytes = rasterPacket.materials.size() *
-            sizeof(raster::RasterMaterialV1);
-        // Only when the section is exactly the size this material list needs.
-        // A count that changed is a different packet layout, and writing into
-        // it would overwrite whatever follows.
-        if (existing.materialCount == rasterPacket.materials.size() &&
-            existing.materialsOffset != 0 &&
-            existing.materialsOffset + bytes <= packetBytes.size()) {
-            std::memcpy(packetBytes.data() + existing.materialsOffset,
-                rasterPacket.materials.data(), bytes);
-            materialsPatched = true;
-        }
-    }
-    if (reuseEncoded || materialsPatched) {
+    if (reuseEncoded) {
         raster::PacketHeaderV1 header{};
         std::memcpy(&header, packetBytes.data(), sizeof(header));
         // Only the fields this function set above. Everything else -- the
