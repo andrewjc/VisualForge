@@ -2102,7 +2102,8 @@ bool CompositeMirrorImpl(
         log::Write("renderer-draws: objects=%u instances=%u rejected=%llu "
             "reused=%llu dropped=%llu no-transform=%u non-affine=%u "
             "mirrored=%u singular=%u non-finite=%u unknown-vb=%u "
-            "unknown-ib=%u empty=%u not-tri=%u range=%u zero-inst=%u",
+            "unknown-ib=%u empty=%u not-tri=%u range=%u zero-inst=%u "
+            "depth-only=%u offscreen=%u",
             translated.objects, translated.instances,
             static_cast<unsigned long long>(translated.rejectedDraws),
             static_cast<unsigned long long>(translated.reusedMeshes),
