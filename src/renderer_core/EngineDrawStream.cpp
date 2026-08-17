@@ -453,7 +453,27 @@ DrawStreamError AssembleSceneGeometry(
                 ++result.missingMeshes;
                 continue;
             }
-            if (!PositionsAreFinite(*found)) {
+            // Skipped for a mesh already in the arena. This walks and decodes
+            // every vertex, so on a settled cell it repeated the whole decode
+            // the arena exists to avoid -- 85 ms of a frame that had nothing
+            // to rebuild. A slot is only created from geometry that passed
+            // this check, and it is only reused while the bytes behind it are
+            // the same ones, so the answer cannot have changed.
+            //
+            // Deliberately an equivalent mutant: removing the `validated`
+            // guard produces identical output and no test can distinguish it,
+            // because it only repeats a check whose answer is already known.
+            // It is kept for the frame time, and it is recorded here rather
+            // than left as an unexplained survivor.
+            auto validated = false;
+            if (arena != nullptr) {
+                const auto slot = arena->slots.find(found->identity);
+                validated = slot != arena->slots.end() &&
+                    slot->second.vertices == found->vertices.data() &&
+                    slot->second.vertexBytes == found->vertices.size_bytes() &&
+                    slot->second.sourceIndices == found->indices.size();
+            }
+            if (!validated && !PositionsAreFinite(*found)) {
                 ++result.unreadableMeshes;
                 continue;
             }

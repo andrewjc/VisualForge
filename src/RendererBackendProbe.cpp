@@ -630,7 +630,16 @@ bool BuildLiveSceneGeometry(
         // whenever they are the same mesh drawn more than once. The first
         // draw to name a texture wins, so a later instance that happened to
         // be recorded without one cannot erase it.
-        s_mirrorObjectTextures.clear();
+        // Not cleared. A mesh's base-colour texture is a property of the mesh,
+        // not of the frame it was seen in, and rebuilding the map every frame
+        // made an index appear and disappear as individual draws happened to
+        // resolve or not. That flicker changed the encoded packet's contents
+        // every frame and defeated the encode cache -- 66 ms of re-encoding a
+        // packet whose geometry had not moved -- as well as making a surface
+        // lose its texture for a frame at a time.
+        //
+        // Bounded by the number of distinct mesh identities the session sees,
+        // and each entry is two integers.
         // How many recorded draws ran with the main scene depth bound. The
         // water reflection pass draws the whole world again through a
         // mirrored camera into its own target, so a large off-screen share
