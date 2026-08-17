@@ -947,3 +947,53 @@ TEST_CASE("P20_depth_only_draws_are_not_world_geometry",
     CHECK(result.rejectedByReason[static_cast<std::size_t>(
         drawstream::DrawStreamError::DepthOnlyPass)] == 1);
 }
+
+TEST_CASE("P20_offscreen_passes_are_not_world_geometry",
+    "[drawstream][phase20]")
+{
+    // Measured live: 4,248 of 6,529 recorded draws ran without the main scene
+    // depth bound. The water reflection pass redraws the world through a
+    // mirrored camera and the loading screen draws through its own; both
+    // arrive as a second scene once re-projected through the world camera.
+    drawstream::DrawRecordV1 draw{};
+    draw.vertexBuffer = 0x1000;
+    draw.indexBuffer = 0x2000;
+    draw.vertexStride = 12;
+    draw.indexCount = 3;
+    draw.instanceCount = 1;
+    draw.hasTransform = true;
+    draw.hasPixelShader = true;
+    draw.sceneDepthBound = true;
+    draw.model[0] = 1.0f;
+    draw.model[5] = 1.0f;
+    draw.model[10] = 1.0f;
+    draw.model[15] = 1.0f;
+
+    const drawstream::TranslationLimits limits{};
+    REQUIRE(drawstream::ValidateDraw(draw, limits) ==
+        drawstream::DrawStreamError::None);
+
+    // Only the depth binding differs, so the refusal is attributable to it.
+    auto offscreen = draw;
+    offscreen.sceneDepthBound = false;
+    CHECK(drawstream::ValidateDraw(offscreen, limits) ==
+        drawstream::DrawStreamError::OffscreenPass);
+
+    // Distinct from the depth-only reason: a draw can be both, and the two
+    // have different causes, so a frame's breakdown must not merge them.
+    auto both = offscreen;
+    both.hasPixelShader = false;
+    CHECK(drawstream::ValidateDraw(both, limits) ==
+        drawstream::DrawStreamError::DepthOnlyPass);
+
+    drawstream::DrawStreamFrame frame{};
+    frame.draws.push_back(draw);
+    frame.draws.push_back(offscreen);
+    scene::ScenePacket packet{};
+    drawstream::TranslationResult result{};
+    REQUIRE(drawstream::TranslateDrawStream(frame, limits, packet, result) ==
+        drawstream::DrawStreamError::None);
+    CHECK(result.objects == 1);
+    CHECK(result.rejectedByReason[static_cast<std::size_t>(
+        drawstream::DrawStreamError::OffscreenPass)] == 1);
+}

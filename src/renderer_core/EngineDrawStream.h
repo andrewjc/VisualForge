@@ -128,10 +128,20 @@ enum class DrawStreamError : std::uint8_t
     // standing in the same place as the real one. The mirror derives its own
     // depth and its own shadows, so it needs none of them.
     DepthOnlyPass,
+    // The main scene depth was not bound, so this draw belongs to an
+    // off-screen pass. Measured live at 4,248 of 6,529 recorded draws.
+    //
+    // The water reflection pass redraws the whole world through a mirrored
+    // camera, and the loading screen draws its object through its own. Both
+    // look like world geometry and neither is: re-projected through the world
+    // camera they arrive as a second, inverted scene, and the loading-screen
+    // object arrives inside out because its winding was decided against a
+    // projection this frame is not using.
+    OffscreenPass,
 };
 
 inline constexpr std::size_t kDrawStreamErrorCount =
-    static_cast<std::size_t>(DrawStreamError::DepthOnlyPass) + 1;
+    static_cast<std::size_t>(DrawStreamError::OffscreenPass) + 1;
 
 // A frame's worth of draws, plus what did not fit. The arena that fills this
 // is bounded because it is written on the render thread; a dropped count that

@@ -119,6 +119,7 @@ DrawStreamError ValidateDraw(
     }
     if (draw.instanceCount == 0) return DrawStreamError::ZeroInstances;
     if (!draw.hasPixelShader) return DrawStreamError::DepthOnlyPass;
+    if (!draw.sceneDepthBound) return DrawStreamError::OffscreenPass;
     if (!draw.hasTransform) return DrawStreamError::NoTransform;
     if (!FiniteModel(draw.model)) {
         return DrawStreamError::NonFiniteTransform;
@@ -612,6 +613,7 @@ const char* ToString(const DrawStreamError error) noexcept
     case DrawStreamError::NonAffineTransform: return "non-affine transform";
     case DrawStreamError::MirroredTransform: return "mirrored transform";
     case DrawStreamError::DepthOnlyPass: return "depth-only pass";
+    case DrawStreamError::OffscreenPass: return "off-screen pass";
     }
     return "unknown";
 }
