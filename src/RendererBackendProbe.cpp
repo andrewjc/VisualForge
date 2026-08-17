@@ -764,11 +764,22 @@ bool BuildLiveSceneGeometry(
     // The rasterizer state each mesh was drawn under, keyed by the same
     // identity the scene objects carry. Built from the same records the scene
     // packet was translated from, so a mesh and its winding cannot disagree.
-    std::unordered_map<std::uint64_t, std::pair<bool, std::uint32_t>> winding;
+    // A sorted vector, not a hash map. There are about six thousand recorded
+    // draws a frame and a map allocates a node for each one, every frame, for
+    // a table that is thrown away at the end of the call.
+    std::vector<std::pair<std::uint64_t, std::pair<bool, std::uint32_t>>>
+        winding;
+    winding.reserve(frame.draws.size());
     for (const auto& record : frame.draws) {
-        winding.emplace(drawstream::MeshIdentity(record),
+        winding.emplace_back(drawstream::MeshIdentity(record),
             std::pair{record.frontCounterClockwise, record.cullMode});
     }
+    // Stable, so the first draw of a mesh still decides its winding, which is
+    // what the map's emplace did by refusing to overwrite.
+    std::stable_sort(winding.begin(), winding.end(),
+        [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
     for (const auto& object : scenePacket.objects) {
         const auto* const held =
             engine_mesh_extractor::Find(object.objectId);
@@ -791,10 +802,16 @@ bool BuildLiveSceneGeometry(
         mesh.indices = held->indices;
         // Absent only if the mesh outlived the record that drew it, in which
         // case the defaults above stand and the runtime.s own defaults apply.
-        if (const auto found = winding.find(object.objectId);
-            found != winding.end()) {
-            mesh.frontCounterClockwise = found->second.first;
-            mesh.cullMode = found->second.second;
+        {
+            const auto found = std::lower_bound(winding.begin(), winding.end(),
+                object.objectId,
+                [](const auto& candidate, const std::uint64_t value) {
+                    return candidate.first < value;
+                });
+            if (found != winding.end() && found->first == object.objectId) {
+                mesh.frontCounterClockwise = found->second.first;
+                mesh.cullMode = found->second.second;
+            }
         }
         meshes.push_back(mesh);
     }
