@@ -70,6 +70,11 @@ struct DrawRecordV1
     // `false` when no rasterizer state was ever bound on the drawing thread,
     // which is D3D11's documented default state rather than a guess.
     bool frontCounterClockwise{};
+    // Whether the main scene depth was bound when this draw ran. False means
+    // an off-screen pass -- the water reflection pass renders the whole world
+    // a second time through a mirrored camera, and those draws are not world
+    // geometry however much they look like it.
+    bool sceneDepthBound{true};
     // Whether a pixel shader was bound when this draw ran. False means a
     // depth-only pass, which carries no colour and is not world geometry the
     // mirror should reproduce.

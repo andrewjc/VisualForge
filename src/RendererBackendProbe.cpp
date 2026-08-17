@@ -631,8 +631,14 @@ bool BuildLiveSceneGeometry(
         // draw to name a texture wins, so a later instance that happened to
         // be recorded without one cannot erase it.
         s_mirrorObjectTextures.clear();
+        // How many recorded draws ran with the main scene depth bound. The
+        // water reflection pass draws the whole world again through a
+        // mirrored camera into its own target, so a large off-screen share
+        // is the measurement behind the scene appearing twice.
+        std::uint64_t onSceneDepth = 0;
         for (std::size_t index = 0; index < count; ++index) {
             const auto& draw = recorded[index];
+            if (draw.sceneDepthBound) ++onSceneDepth;
             if (draw.baseColorTexture == 0) continue;
             ++withTexture;
             s_mirrorObjectTextures.emplace(
@@ -640,9 +646,12 @@ bool BuildLiveSceneGeometry(
         }
         static std::uint64_t s_lastWithTexture = 0xFFFF'FFFF'FFFF'FFFFull;
         if (withTexture != s_lastWithTexture) {
-            log::Write("renderer-drawtex: draws=%llu with-texture=%llu",
+            log::Write("renderer-drawtex: draws=%llu with-texture=%llu "
+                "scene-depth=%llu offscreen=%llu",
                 static_cast<unsigned long long>(count),
-                static_cast<unsigned long long>(withTexture));
+                static_cast<unsigned long long>(withTexture),
+                static_cast<unsigned long long>(onSceneDepth),
+                static_cast<unsigned long long>(count - onSceneDepth));
             s_lastWithTexture = withTexture;
         }
     }
