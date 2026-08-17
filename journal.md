@@ -3495,3 +3495,15 @@ collapses blue to `0/3130`. A single-region assertion would have passed it.
 Normal maps, the 36% of live draws with no resolvable shader, and the 65%
 material coverage ceiling. This goal ends at "a different texture per
 material, on the device, proved against the oracle".
+
+### The live A/B is armed but not yet run
+
+`renderer-mirror-texture-probe` renders the first mirrored frame that has both
+a scene and a library twice -- withheld arm first, so the image reaching the
+swapchain is always the one with textures applied -- and logs
+`pixels/differing/max-channel`. It runs once per session.
+
+The run itself is deferred: a user-owned Fallout 4 process was present at every
+check, and the invariant is to defer rather than adopt or disturb it. Nothing
+about the GPU result waits on this; the live probe measures the same property
+in the engine that `contract.texture_library_frame` measures on the bench.
