@@ -699,8 +699,14 @@ struct alignas(8) LibraryHeader
 
 }
 
-TexturePacketError EncodeTextureLibrary(
-    const std::span<const CapturedTexture> textures,
+namespace {
+
+// One implementation for both overloads. `fetch` returns the texture at an
+// index, or null when the caller handed in a hole.
+template <typename Fetch>
+TexturePacketError EncodeLibraryImpl(
+    const std::size_t count,
+    Fetch fetch,
     std::vector<std::byte>& bytes) noexcept
 {
     try {
@@ -710,10 +716,12 @@ TexturePacketError EncodeTextureLibrary(
         // set of validation rules, and a library entry can be handed to
         // anything that already reads a texture.
         std::vector<std::vector<std::byte>> encoded;
-        encoded.reserve(textures.size());
-        for (const auto& texture : textures) {
+        encoded.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto* const texture = fetch(index);
+            if (texture == nullptr) return TexturePacketError::InvalidResource;
             std::vector<std::byte> one;
-            const auto result = EncodeCapturedTexture(texture, one);
+            const auto result = EncodeCapturedTexture(*texture, one);
             if (result != TexturePacketError::None) return result;
             encoded.push_back(std::move(one));
         }
@@ -756,6 +764,26 @@ TexturePacketError EncodeTextureLibrary(
         bytes.clear();
         return TexturePacketError::AllocationFailure;
     }
+}
+
+}
+
+TexturePacketError EncodeTextureLibrary(
+    const std::span<const CapturedTexture> textures,
+    std::vector<std::byte>& bytes) noexcept
+{
+    return EncodeLibraryImpl(textures.size(),
+        [textures](const std::size_t index) { return &textures[index]; },
+        bytes);
+}
+
+TexturePacketError EncodeTextureLibrary(
+    const std::span<const CapturedTexture* const> textures,
+    std::vector<std::byte>& bytes) noexcept
+{
+    return EncodeLibraryImpl(textures.size(),
+        [textures](const std::size_t index) { return textures[index]; },
+        bytes);
 }
 
 TexturePacketError DecodeTextureLibrary(

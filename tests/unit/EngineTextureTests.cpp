@@ -632,7 +632,8 @@ TEST_CASE("a texture library carries many textures under one contract")
         // and decode to nothing rather than being refused, or the caller would
         // have to special-case the first frame of every load.
         std::vector<std::byte> bytes;
-        REQUIRE(EncodeTextureLibrary({}, bytes) ==
+        REQUIRE(EncodeTextureLibrary(
+            std::span<const CapturedTexture>{}, bytes) ==
             TexturePacketError::None);
         std::vector<CapturedTexture> decoded;
         decoded.emplace_back();
@@ -713,4 +714,35 @@ TEST_CASE("a texture library carries many textures under one contract")
         CHECK(DecodeTextureLibrary(bytes, decoded) !=
             TexturePacketError::None);
     }
+}
+
+TEST_CASE("PM_library_encodes_identically_from_pointers",
+    "[texture][library]")
+{
+    using namespace vf::renderer::texture;
+    // The pointer overload exists to avoid copying a hundred and thirty
+    // megabytes per rebuild, so it has to produce the same bytes as the value
+    // overload -- otherwise it is a second format, not an optimisation.
+    auto first = MakeFallbackTexture(FallbackTextureRole::White);
+    first.resourceId = 0x11;
+    auto second = MakeFallbackTexture(FallbackTextureRole::Black);
+    second.resourceId = 0x22;
+    const std::array<CapturedTexture, 2> values{first, second};
+    const std::array<const CapturedTexture*, 2> pointers{&first, &second};
+
+    std::vector<std::byte> fromValues;
+    std::vector<std::byte> fromPointers;
+    REQUIRE(EncodeTextureLibrary(std::span{values}, fromValues) ==
+        TexturePacketError::None);
+    REQUIRE(EncodeTextureLibrary(std::span{pointers}, fromPointers) ==
+        TexturePacketError::None);
+    CHECK(fromValues == fromPointers);
+
+    // A hole is refused rather than skipped. Skipping would shorten the
+    // library and shift every index after it, so a material would sample a
+    // different texture than the one it named.
+    const std::array<const CapturedTexture*, 2> holed{&first, nullptr};
+    std::vector<std::byte> refused;
+    CHECK(EncodeTextureLibrary(std::span{holed}, refused) ==
+        TexturePacketError::InvalidResource);
 }

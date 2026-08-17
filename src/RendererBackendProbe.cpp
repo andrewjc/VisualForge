@@ -911,7 +911,11 @@ bool BuildLiveSceneGeometry(
             ++s_mirrorTexturedMaterials;
         }
         if (dirty && !s_mirrorLibraryIds.empty()) {
-            std::vector<texture::CapturedTexture> library;
+            // Pointers, not copies. Copying every CapturedTexture into a
+            // contiguous vector duplicated the whole library -- a hundred and
+            // thirty megabytes -- before the encoder had copied anything, and
+            // it happened every time a single texture was added.
+            std::vector<const texture::CapturedTexture*> library;
             library.reserve(s_mirrorLibraryIds.size());
             auto complete = true;
             for (const auto id : s_mirrorLibraryIds) {
@@ -920,7 +924,7 @@ bool BuildLiveSceneGeometry(
                     complete = false;
                     break;
                 }
-                library.push_back(*resident);
+                library.push_back(resident);
             }
             // An entry was evicted between the prune above and here. The
             // re-encode is abandoned rather than compacted: materials have
@@ -942,7 +946,7 @@ bool BuildLiveSceneGeometry(
                 // count.
                 std::map<std::uint32_t, std::uint32_t> formats;
                 for (const auto& entry : library) {
-                    ++formats[static_cast<std::uint32_t>(entry.viewFormat)];
+                    ++formats[static_cast<std::uint32_t>(entry->viewFormat)];
                 }
                 std::string message{"renderer-texlib-formats:"};
                 for (const auto& [format, count] : formats) {

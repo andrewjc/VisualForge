@@ -283,6 +283,17 @@ inline constexpr std::uint16_t kTextureLibraryVersionMinor = 0;
 [[nodiscard]] TexturePacketError EncodeTextureLibrary(
     std::span<const CapturedTexture> textures,
     std::vector<std::byte>& bytes) noexcept;
+// The same encoding from textures the caller already holds elsewhere.
+//
+// A library is a hundred and thirty megabytes of texel data. Gathering it into
+// a contiguous vector first copies all of it purely to satisfy the span, and
+// the encoder then copies it again -- so the value overload costs one whole
+// extra pass over the library every time a single texture is added. A null
+// entry is rejected as InvalidResource rather than skipped, so a caller cannot
+// silently shorten its own library and shift every index after the hole.
+[[nodiscard]] TexturePacketError EncodeTextureLibrary(
+    std::span<const CapturedTexture* const> textures,
+    std::vector<std::byte>& bytes) noexcept;
 [[nodiscard]] TexturePacketError DecodeTextureLibrary(
     std::span<const std::byte> bytes,
     std::vector<CapturedTexture>& textures) noexcept;
