@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -1049,14 +1050,32 @@ TEST_CASE("P20_reused_geometry_matches_a_full_rebuild",
     raster::DecodedPacket rebuilt{};
     drawstream::AssemblyResult rebuiltResult{};
     REQUIRE(drawstream::AssembleSceneGeometry(rebuiltScene, cache, rebuilt,
-        rebuiltResult, false) == drawstream::DrawStreamError::None);
+        rebuiltResult, nullptr) == drawstream::DrawStreamError::None);
     REQUIRE(rebuilt.vertices.size() == 6);
 
-    // Second pass over the same mesh set, reusing what the first produced.
+    // Second pass over the same mesh set through an arena. The arena is
+    // populated by a first pass so the second reuses every slot.
+    drawstream::GeometryArena arena{};
+    auto warmScene = makePacket();
+    raster::DecodedPacket warm{};
+    drawstream::AssemblyResult warmResult{};
+    REQUIRE(drawstream::AssembleSceneGeometry(warmScene, cache, warm,
+        warmResult, &arena) == drawstream::DrawStreamError::None);
     auto reusedScene = makePacket();
     drawstream::AssemblyResult reusedResult{};
-    REQUIRE(drawstream::AssembleSceneGeometry(reusedScene, cache, rebuilt,
-        reusedResult, true) == drawstream::DrawStreamError::None);
+    REQUIRE(drawstream::AssembleSceneGeometry(reusedScene, cache, warm,
+        reusedResult, &arena) == drawstream::DrawStreamError::None);
+    // Reuse must be indistinguishable from the rebuild it replaces.
+    REQUIRE(warm.vertices.size() == rebuilt.vertices.size());
+    CHECK(std::memcmp(warm.vertices.data(), rebuilt.vertices.data(),
+        warm.vertices.size() * sizeof(raster::RasterVertexV3)) == 0);
+    CHECK(warm.indices == rebuilt.indices);
+    CHECK(warm.draws.size() == rebuilt.draws.size());
+    CHECK(warmResult.verticesWithNormals == rebuiltResult.verticesWithNormals);
+    CHECK(reusedResult.verticesWithNormals ==
+        rebuiltResult.verticesWithNormals);
+    CHECK(reusedResult.verticesWithoutNormals ==
+        rebuiltResult.verticesWithoutNormals);
 
     // The draw ranges are what a wrong cursor would corrupt, and a scene made
     // of the right meshes at the wrong offsets still looks like a scene.
@@ -1071,13 +1090,87 @@ TEST_CASE("P20_reused_geometry_matches_a_full_rebuild",
     CHECK(rebuilt.materials.size() == 2);
     CHECK(reusedScene.objects.size() == rebuiltScene.objects.size());
 
-    // A reuse claim that does not match the mesh set is refused rather than
-    // rendered: the draw ranges would point into the wrong geometry.
+    // An arena whose slots no longer describe the arrays beside them is
+    // discarded rather than trusted: the draw ranges would otherwise point
+    // into geometry belonging to something else.
     raster::DecodedPacket stale{};
     stale.vertices.resize(3);
     stale.indices.resize(3);
     auto staleScene = makePacket();
     drawstream::AssemblyResult staleResult{};
-    CHECK(drawstream::AssembleSceneGeometry(staleScene, cache, stale,
-        staleResult, true) != drawstream::DrawStreamError::None);
+    REQUIRE(drawstream::AssembleSceneGeometry(staleScene, cache, stale,
+        staleResult, &arena) == drawstream::DrawStreamError::None);
+    REQUIRE(stale.vertices.size() == rebuilt.vertices.size());
+    CHECK(std::memcmp(stale.vertices.data(), rebuilt.vertices.data(),
+        stale.vertices.size() * sizeof(raster::RasterVertexV3)) == 0);
+}
+
+TEST_CASE("P20_a_mesh_that_keeps_its_identity_but_changes_bytes_is_re_decoded",
+    "[drawstream][phase20]")
+{
+    // The dangerous case for any geometry cache. A mesh identity is derived
+    // from the pooled buffer and the range inside it, so the engine can
+    // re-extract different geometry into the same range and keep the identity.
+    // Reusing the slot then draws the previous object's geometry under the new
+    // one's name -- a scene made of the right objects in the wrong shapes,
+    // which reads as a capture bug rather than a cache bug.
+    const std::array<float, 9> first{
+        0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const std::array<float, 9> second{
+        5.0f, 5.0f, 5.0f, 6.0f, 5.0f, 5.0f, 5.0f, 6.0f, 5.0f};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const std::array<vf::renderer::mesh::InputElementDesc, 1> elements{{
+        {"POSITION", 0, vf::renderer::mesh::kFormatR32G32B32Float, 0, 0}}};
+
+    const auto makePacket = []() {
+        scene::ScenePacket packet{};
+        packet.header.frameId = 1;
+        packet.header.viewId = 1;
+        scene::OpaqueObjectV1 object{};
+        object.objectId = 0x1000;
+        object.materialId = 0x2000;
+        object.flags = scene::ObjectWritesWorldTarget | scene::ObjectStatic;
+        object.boundsMinimum[0] = -1.0f;
+        object.boundsMaximum[0] = 1.0f;
+        object.model[0] = 1.0f;
+        object.model[5] = 1.0f;
+        object.model[10] = 1.0f;
+        object.model[15] = 1.0f;
+        object.geometricNormal[2] = 1.0f;
+        object.shadingNormal[2] = 1.0f;
+        packet.objects.push_back(object);
+        return packet;
+    };
+    const auto makeMesh = [&](const std::array<float, 9>& source) {
+        drawstream::AssembledMesh mesh{};
+        mesh.identity = 0x1000;
+        mesh.vertexStride = 12;
+        REQUIRE(vf::renderer::mesh::BuildLayoutFromInputElements(
+            elements, 12, 0, mesh.layout) ==
+            vf::renderer::mesh::VertexLayoutError::None);
+        mesh.vertices = std::as_bytes(std::span{source});
+        mesh.indices = indices;
+        return mesh;
+    };
+
+    drawstream::GeometryArena arena{};
+    raster::DecodedPacket packet{};
+    drawstream::AssemblyResult result{};
+
+    const std::array<drawstream::AssembledMesh, 1> firstSet{makeMesh(first)};
+    auto firstScene = makePacket();
+    REQUIRE(drawstream::AssembleSceneGeometry(firstScene, firstSet, packet,
+        result, &arena) == drawstream::DrawStreamError::None);
+    REQUIRE(packet.vertices.size() == 3);
+    CHECK(packet.vertices[0].position[0] == 0.0f);
+
+    // Same identity, different bytes.
+    const std::array<drawstream::AssembledMesh, 1> secondSet{makeMesh(second)};
+    auto secondScene = makePacket();
+    REQUIRE(drawstream::AssembleSceneGeometry(secondScene, secondSet, packet,
+        result, &arena) == drawstream::DrawStreamError::None);
+    REQUIRE(packet.vertices.size() >= 3);
+    const auto slot = static_cast<std::size_t>(packet.draws.front().vertexOffset);
+    CHECK(packet.vertices[slot].position[0] == 5.0f);
+    CHECK(packet.vertices[slot].position[1] == 5.0f);
 }

@@ -400,25 +400,34 @@ DrawStreamError AssembleSceneGeometry(
     const std::span<const AssembledMesh> meshes,
     raster::DecodedPacket& rasterPacket,
     AssemblyResult& result,
-    const bool reuseGeometry) noexcept
+    GeometryArena* const arena) noexcept
 {
-    // Vertices and indices are kept only when the caller states this is the
-    // same mesh set it assembled last time. Everything else is rebuilt: draws,
-    // materials and the pruned object list are a few hundred entries, while
-    // the vertex decode is a million and measured 454 ms.
+    // Vertices and indices survive between frames when an arena is supplied.
+    // Everything else is rebuilt: draws, materials and the pruned object list
+    // are a few hundred entries, while the vertex decode is a million and
+    // measured 454 ms.
     auto keptVertices = std::move(rasterPacket.vertices);
     auto keptIndices = std::move(rasterPacket.indices);
     rasterPacket = {};
     result = {};
-    if (reuseGeometry) {
+    if (arena != nullptr) {
         rasterPacket.vertices = std::move(keptVertices);
         rasterPacket.indices = std::move(keptIndices);
+        // The arena and the arrays are one structure in two places, so a slot
+        // that points past the geometry it describes means they have been
+        // separated. Starting over is always correct and costs one frame.
+        for (const auto& [identity, slot] : arena->slots) {
+            if (slot.vertexOffset + slot.vertexCount >
+                    rasterPacket.vertices.size() ||
+                slot.indexOffset + slot.indexCount >
+                    rasterPacket.indices.size()) {
+                arena->slots.clear();
+                rasterPacket.vertices.clear();
+                rasterPacket.indices.clear();
+                break;
+            }
+        }
     }
-    // Where the next mesh would start. Tracked rather than read back from the
-    // arrays, so a reused assembly hands every draw the same range a rebuilt
-    // one does.
-    std::size_t vertexCursor = 0;
-    std::size_t indexCursor = 0;
 
     try {
         // Objects survive only if their geometry has been read back. They are
@@ -476,12 +485,38 @@ DrawStreamError AssembleSceneGeometry(
 
             raster::RasterDrawV1 draw{};
             draw.materialId = keptObjects[index].materialId;
-            draw.firstIndex = static_cast<std::uint32_t>(indexCursor);
+            // This mesh.s place in the arena, reused when it still names the
+            // same bytes and appended when it does not.
+            GeometryArena::Slot slot{};
+            auto decodeNeeded = true;
+            if (arena != nullptr) {
+                const auto found = arena->slots.find(mesh.identity);
+                if (found != arena->slots.end() &&
+                    found->second.vertices == mesh.vertices.data() &&
+                    found->second.vertexBytes == mesh.vertices.size_bytes() &&
+                    found->second.sourceIndices == mesh.indices.size()) {
+                    slot = found->second;
+                    decodeNeeded = false;
+                }
+            }
+            if (decodeNeeded) {
+                slot.vertexOffset =
+                    static_cast<std::uint32_t>(rasterPacket.vertices.size());
+                slot.indexOffset =
+                    static_cast<std::uint32_t>(rasterPacket.indices.size());
+                slot.vertexCount = static_cast<std::uint32_t>(vertexCount);
+                slot.indexCount =
+                    static_cast<std::uint32_t>(mesh.indices.size());
+                slot.vertices = mesh.vertices.data();
+                slot.vertexBytes = mesh.vertices.size_bytes();
+                slot.sourceIndices = mesh.indices.size();
+            }
+            draw.firstIndex = slot.indexOffset;
             draw.indexCount =
                 static_cast<std::uint32_t>(mesh.indices.size());
             // The concatenated base for this mesh, so its own indices stay
             // zero-based and every mesh keeps the numbering it was read with.
-            draw.vertexOffset = static_cast<std::int32_t>(vertexCursor);
+            draw.vertexOffset = static_cast<std::int32_t>(slot.vertexOffset);
             // The winding the engine itself declared for this draw.
             //
             // This was `CounterClockwise` for every mesh, which is the
@@ -501,7 +536,12 @@ DrawStreamError AssembleSceneGeometry(
             // property of the layout.
             const auto declaresNormal = mesh.layout.Find(
                 enginevertex::VertexSemantic::Normal) != nullptr;
-            for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+            // Skipped whole for a mesh already in the arena. The decode is the
+            // expensive half -- a million vertices at 454 ms -- so stepping
+            // through it and merely declining to store the result would keep
+            // the cost this cache exists to remove.
+            for (std::size_t vertex = 0; decodeNeeded && vertex < vertexCount;
+                ++vertex) {
                 // Decoded through the layout the engine declared, never
                 // memcpy'd as three floats. Fallout 4 stores position as four
                 // halves, and half bit patterns read as float32 land on
@@ -558,19 +598,25 @@ DrawStreamError AssembleSceneGeometry(
                     value.normal[0] = decoded.normal[0];
                     value.normal[1] = decoded.normal[1];
                     value.normal[2] = decoded.normal[2];
-                    ++result.verticesWithNormals;
+                    ++slot.verticesWithNormals;
                 } else {
-                    ++result.verticesWithoutNormals;
+                    ++slot.verticesWithoutNormals;
                 }
-                if (!reuseGeometry) rasterPacket.vertices.push_back(value);
+                if (decodeNeeded) rasterPacket.vertices.push_back(value);
             }
-            if (!reuseGeometry) {
+            if (decodeNeeded) {
                 for (const auto index32 : mesh.indices) {
                     rasterPacket.indices.push_back(index32);
                 }
+                if (arena != nullptr) {
+                    arena->slots.insert_or_assign(mesh.identity, slot);
+                }
             }
-            vertexCursor += vertexCount;
-            indexCursor += mesh.indices.size();
+            // Carried on the slot so a reused mesh still reports what it
+            // contributed. Recounting them would mean decoding it again,
+            // which is the work being avoided.
+            result.verticesWithNormals += slot.verticesWithNormals;
+            result.verticesWithoutNormals += slot.verticesWithoutNormals;
 
             raster::RasterMaterialV1 material{};
             material.resourceId = keptObjects[index].materialId;
@@ -587,12 +633,6 @@ DrawStreamError AssembleSceneGeometry(
         // geometry -- which draws a recognisable scene made of the wrong
         // objects, the hardest kind of wrong to attribute. Refused rather than
         // rendered, so the caller rebuilds.
-        if (reuseGeometry &&
-            (rasterPacket.vertices.size() != vertexCursor ||
-                rasterPacket.indices.size() != indexCursor)) {
-            return DrawStreamError::EmptyGeometry;
-        }
-
         packet.objects = std::move(keptObjects);
         packet.instances = std::move(keptInstances);
         packet.header.objectCount =

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace vf::renderer::drawstream {
@@ -266,6 +267,37 @@ struct ExtractionPlan
 // One mesh that has been read out of the pools, ready to be concatenated.
 // Positions are float3 at offset zero, which is what the stride-12 pool
 // holds and was confirmed against the running game rather than assumed.
+// Assembled geometry held across frames, one slot per mesh.
+//
+// A mesh keeps its place in the concatenated vertex and index arrays for as
+// long as it keeps its identity and its backing bytes, so an unchanged mesh
+// costs a lookup instead of a decode. Slots are appended and never moved: a
+// mesh that disappears leaves its geometry behind unreferenced, which is
+// cheaper than reshuffling every draw range around the hole. The arena is
+// rebuilt whole once the unreferenced share outgrows the referenced one.
+struct GeometryArena
+{
+    struct Slot
+    {
+        std::uint32_t vertexOffset{};
+        std::uint32_t vertexCount{};
+        std::uint32_t indexOffset{};
+        std::uint32_t indexCount{};
+        // What the slot was built from. Identity alone would call a
+        // re-extracted mesh unchanged and draw the previous geometry under
+        // the new mesh.s name.
+        const void* vertices{};
+        std::size_t vertexBytes{};
+        std::size_t sourceIndices{};
+        // What this mesh contributed to the normal counters, so a reused slot
+        // reports the same totals a freshly decoded one does.
+        std::uint64_t verticesWithNormals{};
+        std::uint64_t verticesWithoutNormals{};
+    };
+
+    std::unordered_map<std::uint64_t, Slot> slots;
+};
+
 struct AssembledMesh
 {
     std::uint64_t identity{};
@@ -317,12 +349,14 @@ struct AssemblyResult
     std::span<const AssembledMesh> meshes,
     raster::DecodedPacket& rasterPacket,
     AssemblyResult& result,
-    // True only when `rasterPacket` already holds the vertices and indices
-    // this exact mesh set produced. The decode is a million vertices and
-    // measured 454 ms for a result that a settled scene reproduces byte for
-    // byte; every other output is rebuilt regardless. The claim is checked
-    // against the mesh set before it is trusted.
-    bool reuseGeometry = false) noexcept;
+    // Assembled geometry that survives between frames. Null rebuilds
+    // everything, which is what every offline caller wants.
+    //
+    // An all-or-nothing cache is not enough: a live cell streams continuously,
+    // and twenty-one new meshes out of nine hundred forced a full re-decode of
+    // 1.1 million vertices. Each mesh keeps its own slot, so a frame pays only
+    // for the meshes that actually changed.
+    GeometryArena* arena = nullptr) noexcept;
 
 [[nodiscard]] const char* ToString(DrawStreamError error) noexcept;
 

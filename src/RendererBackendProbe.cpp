@@ -850,45 +850,19 @@ bool BuildLiveSceneGeometry(
     // every mesh byte for byte -- measured at 940 of 940 unchanged -- and
     // decoding them again cost 454 ms per frame for an identical result.
     static raster::DecodedPacket s_assembled;
-    static std::uint64_t s_assembledFingerprint = 0;
-    static bool s_assembledValid = false;
+    static drawstream::GeometryArena s_arena;
     auto& rasterPacket = s_assembled;
-
-    // Identity *and* the bytes behind it. Identity alone would call a
-    // re-extracted mesh unchanged, and the reuse would then draw the old
-    // geometry under the new mesh's name.
-    std::uint64_t fingerprint = 0xCBF2'9CE4'8422'2325ull;
-    const auto mix = [&fingerprint](const std::uint64_t value) {
-        fingerprint = (fingerprint ^ value) * 0x0000'0100'0000'01B3ull;
-    };
-    for (const auto& mesh : meshes) {
-        mix(mesh.identity);
-        mix(reinterpret_cast<std::uintptr_t>(mesh.vertices.data()));
-        mix(mesh.vertices.size_bytes());
-        mix(mesh.indices.size());
-    }
-    const auto reuseGeometry = s_assembledValid &&
-        fingerprint == s_assembledFingerprint;
 
     // Taken before the call, because a rejected assembly clears the objects it
     // was given and the count is the first thing worth knowing about it.
     const auto offered = scenePacket.objects.size();
-    auto assembled = drawstream::AssembleSceneGeometry(scenePacket,
-        meshes, rasterPacket, assembly, reuseGeometry);
-    if (assembled != drawstream::DrawStreamError::None && reuseGeometry) {
-        // The reuse was refused. Rebuilding is always available and always
-        // correct, so a rejected cache costs one slow frame rather than a
-        // frame of nothing.
-        s_assembledValid = false;
+    const auto assembled = drawstream::AssembleSceneGeometry(scenePacket,
+        meshes, rasterPacket, assembly, &s_arena);
+    if (assembled != drawstream::DrawStreamError::None) {
+        // The arena describes geometry this assembly did not finish, so it
+        // must not be carried into the next frame.
+        s_arena.slots.clear();
         rasterPacket = {};
-        assembled = drawstream::AssembleSceneGeometry(scenePacket,
-            meshes, rasterPacket, assembly, false);
-    }
-    if (assembled == drawstream::DrawStreamError::None) {
-        s_assembledFingerprint = fingerprint;
-        s_assembledValid = true;
-    } else {
-        s_assembledValid = false;
     }
     if (assembled != drawstream::DrawStreamError::None) {
         // The only path out of this function that said nothing at all. Both
@@ -1093,17 +1067,32 @@ bool BuildLiveSceneGeometry(
     //
     // Keyed on the material texture indices as well as the geometry, because
     // those are assigned above and change as the library fills in.
-    std::uint64_t materialSignature = 0xCBF2'9CE4'8422'2325ull;
-    for (const auto& material : rasterPacket.materials) {
-        materialSignature = (materialSignature ^ material.textureIndex) *
-            0x0000'0100'0000'01B3ull;
+    std::uint64_t contentSignature = 0xCBF2'9CE4'8422'2325ull;
+    const auto fold = [&contentSignature](const std::uint64_t value) {
+        contentSignature =
+            (contentSignature ^ value) * 0x0000'0100'0000'01B3ull;
+    };
+    fold(rasterPacket.vertices.size());
+    fold(rasterPacket.indices.size());
+    // Every field of the packet that is not vertex or index data. The arrays
+    // themselves are covered by their sizes plus the arena's own rule: a mesh
+    // only keeps its slot while it still names the same bytes.
+    for (const auto& draw : rasterPacket.draws) {
+        fold(draw.firstIndex);
+        fold(draw.indexCount);
+        fold(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(draw.vertexOffset)));
+        fold(draw.materialId);
+        fold(static_cast<std::uint64_t>(draw.frontFace));
     }
-    static std::uint64_t s_encodedMaterialSignature = 0;
-    static std::uint64_t s_encodedFingerprint = 0;
+    for (const auto& material : rasterPacket.materials) {
+        fold(material.resourceId);
+        fold(material.textureIndex);
+    }
+    static std::uint64_t s_encodedSignature = 0;
     static bool s_encodedValid = false;
-    const auto reuseEncoded = s_encodedValid && reuseGeometry &&
-        fingerprint == s_encodedFingerprint &&
-        materialSignature == s_encodedMaterialSignature &&
+    const auto reuseEncoded = s_encodedValid &&
+        contentSignature == s_encodedSignature &&
         packetBytes.size() >= sizeof(raster::PacketHeaderV1);
     if (reuseEncoded) {
         raster::PacketHeaderV1 header{};
@@ -1124,8 +1113,7 @@ bool BuildLiveSceneGeometry(
         ? raster::PacketResult{raster::PacketError::None, 0}
         : raster::EncodePacket(rasterPacket, packetBytes);
     if (encoded) {
-        s_encodedFingerprint = fingerprint;
-        s_encodedMaterialSignature = materialSignature;
+        s_encodedSignature = contentSignature;
         s_encodedValid = true;
     } else {
         s_encodedValid = false;
