@@ -598,6 +598,14 @@ struct VulkanRasterRenderer::Impl
     // Phase 18: ray query is optional. A device without it still creates and
     // the mirror falls back to unshadowed lighting rather than failing.
     bool rayQuerySupported{};
+    // Whether the device both supports and has been *given* the descriptor
+    // indexing features a per-material texture array needs. The capability
+    // was declared required in the ABI and reported by the probe long before
+    // anything enabled it at device creation, so "the probe says yes" and
+    // "the device was asked for it" have to be separate facts: sampling a
+    // descriptor array without runtimeDescriptorArray is undefined behaviour
+    // that a validation layer catches and a shipping driver may not.
+    bool descriptorIndexingSupported{};
     PFN_vkCreateAccelerationStructureKHR createAccelerationStructure{};
     PFN_vkDestroyAccelerationStructureKHR destroyAccelerationStructure{};
     PFN_vkGetAccelerationStructureBuildSizesKHR
@@ -1075,6 +1083,12 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
     }
     VkPhysicalDeviceVulkan13Features selected13{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    // Queried alongside the 1.3 features rather than in a second call: the
+    // descriptor-indexing bits live here, and until now nothing in this file
+    // asked for them at all.
+    VkPhysicalDeviceVulkan12Features selected12{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    selected13.pNext = &selected12;
     // The first capable device, kept in case nothing carries the requested
     // LUID and the caller said any would do.
     VkPhysicalDevice fallback{VK_NULL_HANDLE};
@@ -1128,6 +1142,11 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
             features.features.samplerAnisotropy == VK_TRUE;
         independentBlendSupported =
             features.features.independentBlend == VK_TRUE;
+        descriptorIndexingSupported =
+            selected12.descriptorIndexing != VK_FALSE &&
+            selected12.runtimeDescriptorArray != VK_FALSE &&
+            selected12.descriptorBindingPartiallyBound != VK_FALSE &&
+            selected12.shaderSampledImageArrayNonUniformIndexing != VK_FALSE;
         break;
     }
     if (physicalDevice == VK_NULL_HANDLE && fallback != VK_NULL_HANDLE) {
@@ -1142,6 +1161,11 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
             features.features.samplerAnisotropy == VK_TRUE;
         independentBlendSupported =
             features.features.independentBlend == VK_TRUE;
+        descriptorIndexingSupported =
+            selected12.descriptorIndexing != VK_FALSE &&
+            selected12.runtimeDescriptorArray != VK_FALSE &&
+            selected12.descriptorBindingPartiallyBound != VK_FALSE &&
+            selected12.shaderSampledImageArrayNonUniformIndexing != VK_FALSE;
     }
     if (physicalDevice == VK_NULL_HANDLE) {
         return abi::Result::AdapterLuidNotFound;
@@ -1235,11 +1259,24 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR enabledRayQuery{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    // Always chained now, not only when ray query is present. The 1.2 feature
+    // block is also where descriptor indexing lives, and leaving it out of the
+    // chain on a device without ray query silently disabled the texture array
+    // as well -- two unrelated capabilities sharing one struct.
+    enabled13.pNext = &enabled12;
+    if (descriptorIndexingSupported) {
+        // Exactly the four the probe tests for. Asking for a feature the
+        // device did not report makes vkCreateDevice fail outright, which is
+        // why this is gated rather than set unconditionally.
+        enabled12.descriptorIndexing = VK_TRUE;
+        enabled12.runtimeDescriptorArray = VK_TRUE;
+        enabled12.descriptorBindingPartiallyBound = VK_TRUE;
+        enabled12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    }
     if (rayQuerySupported) {
         enabled12.bufferDeviceAddress = VK_TRUE;
         enabledAccel.accelerationStructure = VK_TRUE;
         enabledRayQuery.rayQuery = VK_TRUE;
-        enabled13.pNext = &enabled12;
         enabled12.pNext = &enabledAccel;
         enabledAccel.pNext = &enabledRayQuery;
     }
@@ -1257,6 +1294,16 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
         static_cast<std::uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.empty()
         ? nullptr : deviceExtensions.data();
+    if (callbacks.log != nullptr) {
+        // Reported because "the ABI requires it" and "the device was given
+        // it" turned out to be different facts: the capability was declared
+        // required and probed for a long time before anything enabled it.
+        std::string message{"device features descriptor-indexing="};
+        message += descriptorIndexingSupported ? "on" : "off";
+        message += " ray-query=";
+        message += rayQuerySupported ? "on" : "off";
+        callbacks.log(callbacks.userData, 1u, message.c_str());
+    }
     if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) !=
         VK_SUCCESS) {
         return abi::Result::DeviceCreationFailed;
