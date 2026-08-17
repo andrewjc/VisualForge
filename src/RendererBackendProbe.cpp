@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <map>
 #include <cmath>
 #include <limits>
 #include <cstddef>
@@ -377,6 +378,10 @@ std::vector<std::byte> s_mirrorTextureLibrary;
 // Bumped whenever the encoded library changes, so the backend can tell one
 // frame.s library from the next without decoding or hashing it.
 std::uint64_t s_mirrorLibraryGeneration = 0;
+// Times a re-encode was abandoned because an entry evicted mid-frame. Non-zero
+// is expected and harmless; a number that climbs every frame would mean the
+// prune is never catching up.
+std::uint64_t s_mirrorLibraryDeferredPrunes = 0;
 std::vector<std::uint64_t> s_mirrorLibraryIds;
 std::unordered_map<std::uint64_t, std::uint32_t> s_mirrorLibraryIndexOf;
 // A once-per-session measurement of what the texture library is worth: the
@@ -832,6 +837,37 @@ bool BuildLiveSceneGeometry(
         // ms frame. Now an index is handed out once and the bytes are rebuilt
         // only when a texture is actually added.
         auto dirty = s_mirrorTextureLibrary.empty();
+        // Evicted entries are pruned first, and only they are dropped.
+        //
+        // Clearing the whole mapping on any single eviction cost a full
+        // re-encode of a hundred and thirty megabytes, and then another on
+        // each of the frames that re-added the entries one at a time: sixteen
+        // evictions measured 186 ms of a frame. One eviction should cost one
+        // re-encode of the survivors.
+        //
+        // Before the material loop, never after it. Compaction shifts every
+        // later index down, so a material that had already been handed an
+        // index would end up naming a different texture -- which is worse than
+        // the white it would otherwise have shown.
+        {
+            std::vector<std::uint64_t> survivors;
+            survivors.reserve(s_mirrorLibraryIds.size());
+            for (const auto id : s_mirrorLibraryIds) {
+                if (engine_texture_residency::Find(id) != nullptr) {
+                    survivors.push_back(id);
+                }
+            }
+            if (survivors.size() != s_mirrorLibraryIds.size()) {
+                s_mirrorLibraryIds = std::move(survivors);
+                s_mirrorLibraryIndexOf.clear();
+                for (std::size_t slot = 0; slot < s_mirrorLibraryIds.size();
+                    ++slot) {
+                    s_mirrorLibraryIndexOf.emplace(s_mirrorLibraryIds[slot],
+                        static_cast<std::uint32_t>(slot));
+                }
+                dirty = true;
+            }
+        }
         const auto materialCount = std::min(
             rasterPacket.materials.size(), scenePacket.objects.size());
         for (std::size_t index = 0; index < materialCount; ++index) {
@@ -877,14 +913,41 @@ bool BuildLiveSceneGeometry(
                 }
                 library.push_back(*resident);
             }
-            // An entry the map still names has been evicted, so the indices
-            // already handed out this frame no longer describe the library.
-            // Dropping the whole mapping rebuilds it next frame; the indices
-            // written into this frame's materials then exceed the library the
-            // backend holds, and `ResolveMaterialTextureIndex` turns each of
-            // them back into the sentinel rather than sampling a stale entry.
-            if (!complete ||
-                texture::EncodeTextureLibrary(library, s_mirrorTextureLibrary) !=
+            // An entry was evicted between the prune above and here. The
+            // re-encode is abandoned rather than compacted: materials have
+            // already been handed indices against the current mapping, and
+            // shifting it now would point them at the wrong textures. The
+            // previous bytes stay, any index past them resolves to the
+            // sentinel in the backend, and next frame's prune fixes it before
+            // a single material is assigned.
+            if (complete) {
+                // What the library is actually made of.
+                //
+                // Ninety-three percent of textured draws resolve their base
+                // colour from the register-0 convention rather than from the
+                // shader's own declaration, so if that convention is wrong for
+                // a family the mirror samples whatever else sits at register 0.
+                // BC5 is a two-channel format and in this engine is a normal
+                // map almost without exception: a BC5 population here is the
+                // measurement that turns "the colours look green" into a
+                // count.
+                std::map<std::uint32_t, std::uint32_t> formats;
+                for (const auto& entry : library) {
+                    ++formats[static_cast<std::uint32_t>(entry.viewFormat)];
+                }
+                std::string message{"renderer-texlib-formats:"};
+                for (const auto& [format, count] : formats) {
+                    message += " f";
+                    message += std::to_string(format);
+                    message += "=";
+                    message += std::to_string(count);
+                }
+                log::Write("%s", message.c_str());
+            }
+            if (!complete) {
+                s_mirrorLibraryDeferredPrunes += 1;
+            } else if (texture::EncodeTextureLibrary(
+                library, s_mirrorTextureLibrary) !=
                     texture::TexturePacketError::None) {
                 s_mirrorLibraryIds.clear();
                 s_mirrorLibraryIndexOf.clear();
@@ -904,13 +967,14 @@ bool BuildLiveSceneGeometry(
         if (s_mirrorTexturedMaterials != lastTextured) {
             log::Write("renderer-texlib: materials=%zu textured=%u "
                 "library=%u bytes=%zu resident=%u resident-bytes=%llu "
-                "rejected=%u budget-dropped=%u unreadable=%u",
+                "rejected=%u budget-dropped=%u unreadable=%u deferred=%llu",
                 rasterPacket.materials.size(), s_mirrorTexturedMaterials,
                 s_mirrorLibraryTextures, s_mirrorTextureLibrary.size(),
                 residency.resident,
                 static_cast<unsigned long long>(residency.residentBytes),
                 residency.rejected, residency.budgetDropped,
-                residency.unreadable);
+                residency.unreadable,
+                static_cast<unsigned long long>(s_mirrorLibraryDeferredPrunes));
             lastTextured = s_mirrorTexturedMaterials;
         }
     }
