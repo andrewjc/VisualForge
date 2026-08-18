@@ -339,3 +339,22 @@ comparison of the bounce -- which `contract.indirect_accumulation` already
 demonstrates for histories -- or a reference that traces against the device's
 own acceleration structure. The reflection half of the path is measured clean
 to `5e-08` and is not the obstacle.
+
+## The tile comparison is not sensitive enough, and why
+
+A 16x16 tile-mean comparison was built and measured. It sees through the
+sampling noise exactly as intended -- 7 of 192 tiles mismatch with and without
+a per-hit attribute, and the max tile error moves by 0.4% -- but multiplying
+the reflection's hit albedo by 1.15 also leaves it unchanged and passing.
+
+The ray-traced terms are about 2% of the frame. A 15% error inside one is 0.3%
+frame-wide, under any tile bound loose enough to admit eight-ray sampling
+noise. The per-pixel count at 1/1000 did catch it; loosening that count to
+admit the noise removed the only sensitive bound.
+
+The comparison must therefore be over the **isolated term**. The oracle already
+renders `unreflectedHdr` and `unindirectHdr`, and the device can now render
+with `EnvironmentReflectionDisabled` or `EnvironmentShadowsDisabled` set, so
+both sides can produce a with-and-without pair. Differencing gives the term
+alone, where a 15% error is 15%, and tile means over that difference keep the
+noise averaged while restoring the sensitivity.

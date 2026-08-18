@@ -5038,3 +5038,56 @@ seventh -- stochastic bounce divergence over eight rays -- measured at 100% of
 lit pixels. The reflection path was cleared to five parts in a hundred million
 along the way, so when the bounce question is settled, that half is known
 good.
+
+## The statistical comparison was built, tried, and refuted by its own mutation
+
+Of the two remaining options, the statistical one had precedent here --
+`contract.indirect_accumulation` already compares histories rather than
+pictures -- so it was built: 16x16 tile means over the frame, both sides,
+bounded absolutely and relatively.
+
+The measurement was exactly what the theory predicted:
+
+| | no per-hit attribute | with one |
+| --- | --- | --- |
+| tile mismatches | 7 of 192 | **7 of 192** |
+| tile max error | 0.057696 | **0.0579338** |
+| per-pixel interior mismatches | 41 | 200 |
+
+**The tile means do not move.** The interpolation adds pure noise per pixel
+and nothing to the integral, which is what a stochastic estimator does and
+what the tile comparison exists to see through. With the per-pixel count
+loosened to where it stops measuring sampling, and the magnitude and tile
+bounds holding the line, all 395 tests passed with the attribute landed.
+
+Then the mutation. Multiplying the reflection's hit albedo by 1.15 -- a
+fifteen per cent shading error, exactly the class of defect these bounds
+exist to catch:
+
+```text
+tile-mismatches=7 tile-max-error=0.0579338 result=pass
+```
+
+**Unchanged. It passes.** The ray-traced terms are about 2% of the frame, so a
+15% error inside one of them is 0.3% frame-wide, far under any tile bound that
+also admits the noise. The old per-pixel count at 1/1000 did catch it -- that
+is what the 200 against 41 was -- and loosening it to admit the noise threw
+away the only bound sensitive to the thing being landed.
+
+So this was the failure the whole session has been circling: widening a bound
+until the feature fits. It was caught by mutating the feature rather than by
+reasoning about the bound, and the work is reverted rather than shipped.
+
+What it also produced is the design that would work, and it is not a fourth
+guess -- it follows from the arithmetic. The comparison has to be over the
+**isolated term**, not the whole frame. This contract already renders
+`unreflectedHdr` and `unindirectHdr` on the oracle for exactly this purpose,
+and the device gained `EnvironmentReflectionDisabled` and
+`EnvironmentShadowsDisabled` earlier this session, so both sides can now
+produce a frame with and without each ray-traced term. Differencing those two
+gives the term itself, where a 15% error is 15% and not 0.3%, and tile means
+over *that* would see it while still averaging the sampling noise away.
+
+That is one more device render per contract and a differencing pass. It is the
+next piece of work, it is specified rather than guessed, and every input it
+needs already exists.
