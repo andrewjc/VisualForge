@@ -291,6 +291,12 @@ struct SceneCoverage
 
 struct GBufferComparison
 {
+    // Plane 0 albedo, 1 geometric normal and roughness, 2 shading normal and
+    // depth, 3 reactive; and the channel within it.
+    std::uint32_t worstGroup{};
+    std::uint32_t worstChannel{};
+    float worstExpected{};
+    float worstActual{};
     std::uint64_t comparedPixels{};
     std::uint64_t differingPixels{};
     std::uint64_t identityMismatches{};

@@ -5398,3 +5398,38 @@ a per-field breakdown before anything is changed.
 
 399 tests, 398 passing in both configurations, the one failure being the
 build probe against the updated game.
+
+### The cutout fixture's blocker, located
+
+The G-buffer delta that held the fixture back is now bounded to a plane, a
+channel, and two values, and three controls rule out everything the any-hit
+work touched. The comparison used to report only a maximum; it now names the
+plane, the channel, and both values, because a maximum with no name says two
+pictures differ without saying in what.
+
+`gbuffer-worst-plane=2 gbuffer-worst-channel=0` -- the **shading normal's X**,
+`0.0980393` on the reference against `0` on the device, on 1494 interior
+pixels.
+
+Ruled out by measurement, not by argument:
+
+| control | result |
+| --- | --- |
+| structure kept opaque, object still classified tested | delta unchanged |
+| depth prepass forced off | error rises to 1.0, mismatches stay 1494 |
+| occluder pixel count, both sides | 1715 and 1715 |
+| object and material identity, every pixel | 0 mismatches |
+
+So it is not the non-opaque geometry flag, not the candidate traversal, and
+not the prepass that an alpha class switches on -- the prepass is doing its
+job, since removing it makes the frame ten times worse. The two sides cover
+the same pixels with the same objects and disagree about the shading normal
+on some of them.
+
+`0.0980393` is exactly `25/255`, which is a raw 8-bit ratio rather than a
+decoded normal component -- a normal component comes out of a `2x-1` remap and
+would not land on a whole number of 255ths by accident. That points at a
+texel read without its decode on one side, and it is where the next
+investigation starts. The cutout fixture stays out of the tree until it is
+resolved; the wiring it exercises is already committed and the shadow half of
+it agrees exactly.

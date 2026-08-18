@@ -1767,8 +1767,19 @@ GBufferComparison CompareGBuffer(
                     totalError = std::numeric_limits<double>::infinity();
                     differs = true;
                 } else {
-                    comparison.maximumAbsoluteError = std::max(
-                        comparison.maximumAbsoluteError, error);
+                    if (error > comparison.maximumAbsoluteError) {
+                        comparison.maximumAbsoluteError = error;
+                        // Which plane and channel carried it. A maximum with
+                        // no name says two pictures differ without saying in
+                        // what, and the field is the first thing any
+                        // investigation needs.
+                        comparison.worstGroup =
+                            static_cast<std::uint32_t>(group);
+                        comparison.worstChannel =
+                            static_cast<std::uint32_t>(channel);
+                        comparison.worstExpected = leftChannels[group][channel];
+                        comparison.worstActual = rightChannels[group][channel];
+                    }
                     totalError += error;
                     differs = differs || error != 0.0f;
                 }

@@ -6642,6 +6642,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
             ? baselineGbuffer : rendered.gbuffer;
 
     InteriorComparison interior{};
+    std::uint64_t occluderPixels = 0;
+    std::uint64_t expectedOccluderPixels = 0;
     std::uint64_t tintPixels = 0;
     std::uint64_t expectedTintPixels = 0;
     std::uint64_t emissivePixels = 0;
@@ -6663,6 +6665,11 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         comparison = scene::CompareGBuffer(expected.pixels, parityGbuffer);
         interior = CompareInteriorPixels(expected, parityGbuffer, 1.0e-3f);
         const auto tintedId = scenePacket.objects[0].objectId;
+    // The occluder, counted on both sides. "The device wrote nothing here"
+    // and "the device wrote something different" are not the same finding.
+    const auto occluderId = kSceneObjectIdBase + kSceneObjectCount;
+    occluderPixels = CountObjectPixels(parityGbuffer, occluderId);
+    expectedOccluderPixels = CountObjectPixels(expected.pixels, occluderId);
         const auto emissiveId = scenePacket.objects[2].objectId;
         tintPixels = CountObjectPixels(parityGbuffer, tintedId);
         expectedTintPixels = CountObjectPixels(expected.pixels, tintedId);
@@ -7612,6 +7619,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " reflection-probe-hits=" << reflectionProbeHits
               << " indirect-pixels=" << indirectPixels
               << " indirect-max-delta=" << maximumIndirectDelta
+              << " occluder-pixels=" << occluderPixels
+              << " expected-occluder-pixels=" << expectedOccluderPixels
               << " tint-pixels=" << tintPixels
               << " expected-tint-pixels=" << expectedTintPixels
               << " emissive-pixels=" << emissivePixels
@@ -7659,6 +7668,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " lobe-differs=" << (lobeDiffers ? "yes" : "no")
               << " gbuffer-identity-mismatches="
               << comparison.identityMismatches
+              << " gbuffer-worst-want=" << comparison.worstExpected
+              << " gbuffer-worst-got=" << comparison.worstActual
+              << " gbuffer-worst-plane=" << comparison.worstGroup
+              << " gbuffer-worst-channel=" << comparison.worstChannel
               << " gbuffer-max-error=" << comparison.maximumAbsoluteError
               << " interior=" << interior.interiorPixels
               << " interior-mismatches=" << interior.mismatchedPixels
