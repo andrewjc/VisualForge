@@ -377,6 +377,21 @@ struct InstanceRange
     const ScenePacket& scene,
     raster::DecodedPacket& projected,
     std::vector<std::array<float, 3>>* cameraRelativePositions) noexcept;
+// And the reciprocal of each vertex's clip w, which is what makes an
+// attribute interpolate the way hardware interpolates it. Screen-space
+// barycentrics weight a value linearly across the *picture*; a perspective
+// projection needs it linear across the *surface*, and the two agree only
+// while the attribute is constant or the triangle faces the camera. Every
+// fixture here keeps varying attributes off rotated geometry for exactly
+// that reason, which is a limit on what can be tested rather than a
+// property of the renderer.
+[[nodiscard]] ScenePacketError ProjectScenePacket(
+    const raster::DecodedPacket& source,
+    const view::ViewRecordV1& view,
+    const ScenePacket& scene,
+    raster::DecodedPacket& projected,
+    std::vector<std::array<float, 3>>* cameraRelativePositions,
+    std::vector<float>* inverseW) noexcept;
 [[nodiscard]] ScenePacketError RenderReferenceGBuffer(
     const raster::DecodedPacket& projected,
     const ScenePacket& scene,
@@ -414,6 +429,11 @@ struct ReferenceInputs
     // without these the reference would light a surface at its screen
     // position while the shader lights it at its world position.
     std::span<const std::array<float, 3>> vertexPositions{};
+    // Parallel to `vertexPositions`. Present means attributes interpolate
+    // perspective-correctly, the way the device interpolates them; absent
+    // means screen-space, which agrees only while the attribute is constant
+    // across the triangle or the triangle faces the camera.
+    std::span<const float> inverseW{};
     // Occluders in the same camera-relative space as the lights and the
     // shaded positions, which is the space the top-level structure is built
     // in. Absent means an unshadowed reference: exactly what a device without

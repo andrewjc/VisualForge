@@ -826,7 +826,7 @@ ScenePacketError ProjectScenePacket(
     raster::DecodedPacket& projected) noexcept
 {
     return ProjectScenePacket(
-        source, capturedView, scene, projected, nullptr);
+        source, capturedView, scene, projected, nullptr, nullptr);
 }
 
 ScenePacketError ProjectScenePacket(
@@ -836,7 +836,20 @@ ScenePacketError ProjectScenePacket(
     raster::DecodedPacket& projected,
     std::vector<std::array<float, 3>>* const cameraRelativePositions) noexcept
 {
+    return ProjectScenePacket(source, capturedView, scene, projected,
+        cameraRelativePositions, nullptr);
+}
+
+ScenePacketError ProjectScenePacket(
+    const raster::DecodedPacket& source,
+    const view::ViewRecordV1& capturedView,
+    const ScenePacket& scene,
+    raster::DecodedPacket& projected,
+    std::vector<std::array<float, 3>>* const cameraRelativePositions,
+    std::vector<float>* const inverseW) noexcept
+{
     if (cameraRelativePositions != nullptr) cameraRelativePositions->clear();
+    if (inverseW != nullptr) inverseW->clear();
     projected = {};
     if (view::ValidateView(capturedView) != view::ViewError::None) {
         return ScenePacketError::ViewMismatch;
@@ -926,6 +939,10 @@ ScenePacketError ProjectScenePacket(
                             static_cast<float>(world[0]),
                             static_cast<float>(world[1]),
                             static_cast<float>(world[2])});
+                    }
+                    if (inverseW != nullptr) {
+                        inverseW->push_back(
+                            static_cast<float>(1.0 / clip[3]));
                     }
                 }
                 projected.draws.push_back(draw);
@@ -1272,6 +1289,15 @@ ScenePacketError RenderReferenceGBuffer(
                     continue;
                 }
                 const auto faceSign = backFacing ? -1.0f : 1.0f;
+                // Zero when the caller supplied no reciprocals, which the
+                // attribute weighting reads as "screen-space", preserving
+                // exactly what every earlier fixture compared against.
+                const auto inverseWA = indexA < inputs.inverseW.size()
+                    ? inputs.inverseW[indexA] : 0.0f;
+                const auto inverseWB = indexB < inputs.inverseW.size()
+                    ? inputs.inverseW[indexB] : 0.0f;
+                const auto inverseWC = indexC < inputs.inverseW.size()
+                    ? inputs.inverseW[indexC] : 0.0f;
                 const auto a = screen(vertexA);
                 const auto b = screen(vertexB);
                 const auto c = screen(vertexC);
@@ -1304,20 +1330,38 @@ ScenePacketError RenderReferenceGBuffer(
                     for (auto x = minX; x <= maxX; ++x) {
                         const auto sampleX = static_cast<float>(x) + 0.5f;
                         const auto sampleY = static_cast<float>(y) + 0.5f;
-                        const auto weightA = edge(
+                        const auto screenA = edge(
                             b, c, sampleX, sampleY) / area;
-                        const auto weightB = edge(
+                        const auto screenB = edge(
                             c, a, sampleX, sampleY) / area;
-                        const auto weightC = edge(
+                        const auto screenC = edge(
                             a, b, sampleX, sampleY) / area;
                         constexpr float edgeTolerance = -1.0e-6f;
-                        if (weightA < edgeTolerance ||
-                            weightB < edgeTolerance ||
-                            weightC < edgeTolerance) {
+                        if (screenA < edgeTolerance ||
+                            screenB < edgeTolerance ||
+                            screenC < edgeTolerance) {
                             continue;
                         }
-                        const auto depth = weightA * a[2] +
-                            weightB * b[2] + weightC * c[2];
+                        const auto depth = screenA * a[2] +
+                            screenB * b[2] + screenC * c[2];
+                        // Coverage and depth come from the screen-space
+                        // weights -- a pixel is inside the triangle or it is
+                        // not, and NDC z is already linear in screen space.
+                        // Attributes are the ones that need correcting, so
+                        // the two sets are kept apart rather than one being
+                        // quietly used for both.
+                        auto weightA = screenA;
+                        auto weightB = screenB;
+                        auto weightC = screenC;
+                        if (inverseWA > 0.0f) {
+                            const auto sum = screenA * inverseWA +
+                                screenB * inverseWB + screenC * inverseWC;
+                            if (sum > 0.0f) {
+                                weightA = screenA * inverseWA / sum;
+                                weightB = screenB * inverseWB / sum;
+                                weightC = screenC * inverseWC / sum;
+                            }
+                        }
                         auto& destination = image.pixels[
                             static_cast<std::size_t>(y) * image.width +
                             static_cast<std::size_t>(x)];
