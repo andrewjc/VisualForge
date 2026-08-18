@@ -186,6 +186,10 @@ struct FamilyCapture
 
     std::array<float, 3> emitColor{};
     float emitScale{1.0f};
+    // The surface colour itself, independent of whether a tint is declared.
+    // A ray-query hit has no vertex attributes bound and so cannot sample the
+    // base texture; this is what a reflection shades with.
+    std::array<float, 3> baseColor{1.0f, 1.0f, 1.0f};
     std::array<float, 3> tintColor{1.0f, 1.0f, 1.0f};
 
     float subsurfaceRolloff{};
@@ -317,6 +321,9 @@ struct FamilyDescriptor
     std::array<FamilySlot, kShaderTextureSlots> slots{};
     FamilyFeatures features{};
     FamilyEmission emission{};
+    // Carried whether or not a tint is declared: a tint modulates this, it
+    // does not stand in for it.
+    std::array<float, 3> baseColor{1.0f, 1.0f, 1.0f};
     FamilyTint tint{};
     FamilyPalette palette{};
     FamilySubsurface subsurface{};
@@ -381,7 +388,11 @@ struct alignas(16) GpuFamilyRecordV1
     // w carries the tint enable, so a zero tint colour and an absent tint
     // are distinguishable.
     float tintColor[4]{};
+    // Appended rather than folded into a spare lane of another vector. A
+    // colour smuggled through `subsurface.w` reads as data and is not.
+    float baseColor[4]{};
     float subsurface[4]{};
+
     float parallax[4]{};
     float eyeCenterRadius[4]{};
     float layerAndEye[4]{};
@@ -470,7 +481,11 @@ struct alignas(16) FamilyRecordV1
     std::uint64_t reserved2{};
     float emissionColor[4]{};
     float tintColor[4]{};
+    // Appended rather than folded into a spare lane of another vector. A
+    // colour smuggled through `subsurface.w` reads as data and is not.
+    float baseColor[4]{};
     float subsurface[4]{};
+
     float parallax[4]{};
     float eyeCenterRadius[4]{};
     float layerAndEye[4]{};
@@ -530,23 +545,25 @@ struct FamilyPacket
 [[nodiscard]] const char* ToString(MaterialFamily family) noexcept;
 
 static_assert(sizeof(FamilySlotV1) == 16);
-static_assert(sizeof(FamilyRecordV1) == 368);
+static_assert(sizeof(FamilyRecordV1) == 384);
 static_assert(offsetof(FamilyRecordV1, emissionColor) == 80);
 static_assert(offsetof(FamilyRecordV1, tintColor) == 96);
-static_assert(offsetof(FamilyRecordV1, wetnessHigh) == 192);
-static_assert(offsetof(FamilyRecordV1, slots) == 208);
+static_assert(offsetof(FamilyRecordV1, baseColor) == 112);
+static_assert(offsetof(FamilyRecordV1, wetnessHigh) == 208);
+static_assert(offsetof(FamilyRecordV1, slots) == 224);
 static_assert(sizeof(FamilyPacketHeaderV1) == 64);
 static_assert(offsetof(FamilyPacketHeaderV1, recordCount) == 40);
 static_assert(offsetof(FamilyPacketHeaderV1, recordsOffset) == 44);
-static_assert(sizeof(GpuFamilyRecordV1) == 144);
+static_assert(sizeof(GpuFamilyRecordV1) == 160);
 static_assert(sizeof(GpuFamilyRecordV1) == scene::kGpuFamilyRecordSize);
 static_assert(offsetof(GpuFamilyRecordV1, emissionColor) == 16);
 static_assert(offsetof(GpuFamilyRecordV1, tintColor) == 32);
-static_assert(offsetof(GpuFamilyRecordV1, subsurface) == 48);
-static_assert(offsetof(GpuFamilyRecordV1, parallax) == 64);
-static_assert(offsetof(GpuFamilyRecordV1, eyeCenterRadius) == 80);
-static_assert(offsetof(GpuFamilyRecordV1, layerAndEye) == 96);
-static_assert(offsetof(GpuFamilyRecordV1, wetnessLow) == 112);
-static_assert(offsetof(GpuFamilyRecordV1, wetnessHigh) == 128);
+static_assert(offsetof(GpuFamilyRecordV1, baseColor) == 48);
+static_assert(offsetof(GpuFamilyRecordV1, subsurface) == 64);
+static_assert(offsetof(GpuFamilyRecordV1, parallax) == 80);
+static_assert(offsetof(GpuFamilyRecordV1, eyeCenterRadius) == 96);
+static_assert(offsetof(GpuFamilyRecordV1, layerAndEye) == 112);
+static_assert(offsetof(GpuFamilyRecordV1, wetnessLow) == 128);
+static_assert(offsetof(GpuFamilyRecordV1, wetnessHigh) == 144);
 
 }

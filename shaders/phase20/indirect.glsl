@@ -103,7 +103,13 @@ vec3 vfIndirect(
             vec3 hitNormal = vfOrientHitNormal(
                 opaqueObjects.records[objectIndex].geometricNormal.xyz,
                 direction, true);
-            vec3 hitAlbedo = sceneFamilies.records[objectIndex].tintColor.rgb;
+            // The bounce surface's own colour, tinted only where a tint is
+            // declared. Reading the tint alone made every ordinary material
+            // bounce black, so the diffuse indirect term contributed nothing
+            // on exactly the surfaces that carry a room's light.
+            vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
+                sceneFamilies.records[objectIndex].baseColor.rgb);
+
             // Shaded through the same function the raster pass uses, which
             // shadows the bounce surface as well: a room must not brighten
             // from a wall the sun cannot reach.

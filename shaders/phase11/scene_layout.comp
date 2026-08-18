@@ -59,7 +59,8 @@ void main()
         GpuFamilyRecordV1 family =
             sceneFamilies.records[scenePush.objectIndex];
         sceneGBufferLayout.pixels[0].geometricNormalRoughness =
-            family.emissionColor + family.tintColor + family.subsurface +
+            family.emissionColor + family.tintColor + family.baseColor +
+            family.subsurface +
             family.parallax + family.eyeCenterRadius + family.layerAndEye +
             family.wetnessLow + family.wetnessHigh +
             vec4(float(vfMaterialFamily(family)),

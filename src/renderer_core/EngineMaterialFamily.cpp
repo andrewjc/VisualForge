@@ -181,7 +181,8 @@ FamilyError TranslateMaterialFamily(
     descriptor = {};
     if (capture.materialId == 0) return FamilyError::InvalidIdentity;
     if (!Finite(capture.emitColor) || !Finite(capture.emitScale) ||
-        !Finite(capture.tintColor) || !Finite(capture.subsurfaceRolloff) ||
+        !Finite(capture.baseColor) || !Finite(capture.tintColor) ||
+        !Finite(capture.subsurfaceRolloff) ||
         !Finite(capture.rimPower) || !Finite(capture.backlightPower) ||
         !Finite(capture.eyeCenter) || !Finite(capture.eyeRadius) ||
         !Finite(capture.eyeIrisScale) || !Finite(capture.parallaxScale) ||
@@ -342,6 +343,9 @@ FamilyError TranslateMaterialFamily(
     if (descriptor.tint.enabled) {
         descriptor.tint.color = capture.tintColor;
     }
+    // Unconditional, unlike the tint. Every surface has a colour; only some
+    // declare a tint to modulate it by.
+    descriptor.baseColor = capture.baseColor;
 
     descriptor.palette.colorFromGreyscale =
         HasFlag(flags, PropertyFlag::GreyscaleToPaletteColor);
@@ -444,6 +448,7 @@ GpuFamilyRecordV1 BuildFamilyGpuRecord(
     for (std::size_t channel = 0; channel < 3; ++channel) {
         record.emissionColor[channel] = descriptor.emission.color[channel];
         record.tintColor[channel] = descriptor.tint.color[channel];
+        record.baseColor[channel] = descriptor.baseColor[channel];
     }
     // The enable rides in w so a zero tint colour and an absent tint stay
     // distinguishable on the GPU.
@@ -513,6 +518,7 @@ FamilyRecordV1 MakeFamilyRecord(
     std::memcpy(record.emissionColor, gpu.emissionColor,
         sizeof(record.emissionColor));
     std::memcpy(record.tintColor, gpu.tintColor, sizeof(record.tintColor));
+    std::memcpy(record.baseColor, gpu.baseColor, sizeof(record.baseColor));
     std::memcpy(record.subsurface, gpu.subsurface, sizeof(record.subsurface));
     std::memcpy(record.parallax, gpu.parallax, sizeof(record.parallax));
     std::memcpy(record.eyeCenterRadius, gpu.eyeCenterRadius,
@@ -553,7 +559,8 @@ FamilyPacketError ValidateFamilyPacket(const FamilyPacket& packet) noexcept
             return FamilyPacketError::UnclassifiedRecord;
         }
         const float* const payloads[]{record.emissionColor,
-            record.tintColor, record.subsurface, record.parallax,
+            record.tintColor, record.baseColor, record.subsurface,
+            record.parallax,
             record.eyeCenterRadius, record.layerAndEye, record.wetnessLow,
             record.wetnessHigh};
         for (const auto* payload : payloads) {
@@ -726,6 +733,7 @@ GpuFamilyRecordV1 BuildFamilyGpuRecord(
     std::memcpy(gpu.emissionColor, record.emissionColor,
         sizeof(gpu.emissionColor));
     std::memcpy(gpu.tintColor, record.tintColor, sizeof(gpu.tintColor));
+    std::memcpy(gpu.baseColor, record.baseColor, sizeof(gpu.baseColor));
     std::memcpy(gpu.subsurface, record.subsurface, sizeof(gpu.subsurface));
     std::memcpy(gpu.parallax, record.parallax, sizeof(gpu.parallax));
     std::memcpy(gpu.eyeCenterRadius, record.eyeCenterRadius,

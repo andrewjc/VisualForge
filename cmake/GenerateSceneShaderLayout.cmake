@@ -28,8 +28,8 @@ endif()
 if(NOT VF_REFLECTION MATCHES "binding:[ \t]+14")
     message(FATAL_ERROR "phase16 family records drifted from set 0 binding 14")
 endif()
-if(NOT VF_REFLECTION MATCHES "size:[ \t]+144")
-    message(FATAL_ERROR "phase16 family record drifted from 144 bytes")
+if(NOT VF_REFLECTION MATCHES "size:[ \t]+160")
+    message(FATAL_ERROR "phase16 family record drifted from 160 bytes")
 endif()
 if(NOT VF_REFLECTION MATCHES "binding:[ \t]+15")
     message(FATAL_ERROR "phase17 light records drifted from set 0 binding 15")
@@ -98,7 +98,7 @@ inline constexpr std::uint32_t kSceneMaterialTextureCapacity = 256;
 inline constexpr std::uint32_t kGpuOpaqueObjectSize = 224;
 inline constexpr std::uint32_t kGpuSceneInstanceSize = 160;
 inline constexpr std::uint32_t kGpuVisibilityRecordSize = 64;
-inline constexpr std::uint32_t kGpuFamilyRecordSize = 144;
+inline constexpr std::uint32_t kGpuFamilyRecordSize = 160;
 inline constexpr std::uint32_t kGpuLightRecordSize = 80;
 inline constexpr std::uint32_t kGpuEnvironmentSize = 112;
 inline constexpr std::uint32_t kGpuGBufferPixelSize = 80;

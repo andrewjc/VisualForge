@@ -244,7 +244,17 @@ vec3 vfReflection(
     vec3 hitNormal = vfOrientHitNormal(
         opaqueObjects.records[objectIndex].geometricNormal.xyz, direction,
         true);
-    vec3 hitAlbedo = sceneFamilies.records[objectIndex].tintColor.rgb;
+    // The surface colour, tinted only where a tint is actually declared --
+    // the same rule `vfApplyTint` applies in the raster pass, so a reflected
+    // surface cannot disagree with the surface it reflects.
+    //
+    // This read `tintColor` alone, which `TranslateMaterialFamily` fills only
+    // for a tinting family or an explicit tint flag. Every ordinary material
+    // therefore reflected black, which is indistinguishable from a ray that
+    // hit nothing at all.
+    vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
+        sceneFamilies.records[objectIndex].baseColor.rgb);
+
 
     source = kVfReflectionGeometry;
     // Shaded through the same function the raster pass uses, so a reflection

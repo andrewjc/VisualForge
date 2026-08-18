@@ -70,6 +70,9 @@ struct GpuFamilyRecordV1
     uint paletteFlags;
     vec4 emissionColor;
     vec4 tintColor;
+    // The surface colour a ray-query hit shades with. A tint modulates it
+    // and never replaces it: the tint is zero unless one is declared.
+    vec4 baseColor;
     vec4 subsurface;
     vec4 parallax;
     vec4 eyeCenterRadius;

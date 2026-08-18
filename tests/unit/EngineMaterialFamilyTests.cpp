@@ -732,8 +732,11 @@ TEST_CASE("P16_family_packet_is_pointer_free_deterministic_and_checksummed",
     CHECK(material::ValidateFamilyPacket(nonFinite) ==
         material::FamilyPacketError::NonFiniteValue);
 
-    // The record is the wire format, so its layout is pinned.
-    CHECK(sizeof(material::FamilyRecordV1) == 368);
+    // The record is the wire format, so its layout is pinned. 384 since the
+    // base colour was added: a ray-query hit has no vertex attributes and
+    // shades from this record, and the tint it used to read is zero unless a
+    // tint is declared.
+    CHECK(sizeof(material::FamilyRecordV1) == 384);
     CHECK(sizeof(material::FamilySlotV1) == 16);
     CHECK(sizeof(material::FamilyPacketHeaderV1) == 64);
 }
@@ -838,4 +841,57 @@ TEST_CASE("P16_every_family_reports_a_broad_shader_class_for_pipeline_keys",
     // Twenty-one families, far fewer pipeline classes.
     CHECK(distinct <= 8);
     CHECK(distinct >= 2);
+}
+
+TEST_CASE("P19_family_record_carries_a_base_colour_for_untinted_materials",
+    "[phase19][family]")
+{
+    // `reflection.glsl` shades a ray-query hit from the per-object family
+    // record, because a ray query has no vertex attributes bound and so has
+    // no way to sample the surface's texture. It read `tintColor` -- but
+    // `TranslateMaterialFamily` fills the tint only when one is *declared*,
+    // by a tinting family or an explicit tint flag, and the enable rides in
+    // `tintColor.w` precisely so that an absent tint is distinguishable from
+    // a black one.
+    //
+    // For every ordinary material the tint is therefore zero by construction,
+    // and every ray-traced reflection of ordinary geometry shaded black.
+    // Measured on the mirror contract: the hit albedo read 0.034 where the
+    // object's own declared colour was 6.0, so a reflection carrying the
+    // target could not be told from one carrying nothing.
+    material::FamilyCapture capture{};
+    capture.materialId = 0x4321;
+    capture.generation = 1;
+    capture.revision = 1;
+    capture.staticRevision = 1;
+    capture.featureId = material::FeatureIdOf(
+        material::MaterialFamily::Default);
+    capture.baseColor = {0.25f, 0.5f, 0.75f};
+    capture.emitScale = 1.0f;
+    capture.eyeRadius = 0.5f;
+    capture.eyeIrisScale = 1.0f;
+    // The slots every material must declare; without them the translation
+    // refuses the capture before it ever reaches the colour.
+    capture.slots[0].resourceId = 0x8000'0000'0000'1901ull;
+    capture.slots[0].generation = 1;
+    capture.slots[0].authored = true;
+    capture.slots[1].resourceId = 0x8000'0000'0000'1902ull;
+    capture.slots[1].generation = 1;
+    capture.slots[1].authored = true;
+
+    material::FamilyDescriptor descriptor{};
+    REQUIRE(material::TranslateMaterialFamily(capture, descriptor) ==
+        material::FamilyError::None);
+    CHECK(descriptor.baseColor[0] == 0.25f);
+    CHECK(descriptor.baseColor[1] == 0.5f);
+    CHECK(descriptor.baseColor[2] == 0.75f);
+
+    const auto gpu = material::BuildFamilyGpuRecord(descriptor);
+    CHECK(gpu.baseColor[0] == 0.25f);
+    CHECK(gpu.baseColor[1] == 0.5f);
+    CHECK(gpu.baseColor[2] == 0.75f);
+    // The tint stays absent, so the shader can still tell "no tint declared"
+    // from "tinted black" and modulate only when there is something to
+    // modulate by.
+    CHECK(gpu.tintColor[3] == 0.0f);
 }
