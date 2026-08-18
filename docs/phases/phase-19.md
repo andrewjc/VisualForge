@@ -266,3 +266,23 @@ disagreement until it is looked for.
 The next step is to prove the fetch, not to change the reference: hold the
 corner colours constant per triangle so interpolation cannot matter, confirm
 the device reproduces the oracle exactly, then vary one corner at a time.
+
+## Where the per-hit attribute work actually stands
+
+Four candidate causes proposed, four eliminated by measurement:
+
+- different hit geometry -- excluded and counted, 117 of 41,981, and removing
+  them does not fix it
+- sub-primitive hit points -- the two agree to `5.1e-05` units
+- a defect in the attribute fetch -- the fetched corner is bit-identical
+- the fetch infrastructure itself -- with it present and the interpolation
+  unused, the contract passes at 41 mismatches
+
+With the interpolation applied to both the reflection and the indirect paths
+the interior comparison reports 200 mismatches against a bound of 41, while
+the interpolated red agrees between the two sides to `1.2e-07`.
+
+The residual is therefore small, real, and unnamed. The probe watches one
+channel of one path; widening it to all three channels and separating the
+specular term from the bounce is the next step, and it is a lane and a
+contract run rather than a design change.

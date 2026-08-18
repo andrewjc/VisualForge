@@ -4835,3 +4835,52 @@ would have been hours of work -- a mask keyed on the wrong identity, an
 architectural change to how the reference derives geometry, and a hunt through
 correct offset arithmetic. The instrument is cheap and the theory is expensive,
 which has been true every time this session.
+
+## The interpolation disagreement, bracketed to something small and unprobed
+
+The probe left unfinished last round was completed: both sides report the
+*interpolated* value rather than the corner they fetched, differenced on
+pixels where they agree about what they hit.
+
+```text
+divergent-hits=0 interp-delta=1.19209e-07
+```
+
+**One float ULP.** The two compute the same interpolated red. Combined with
+the earlier probes, the picture is:
+
+| measured | result |
+| --- | --- |
+| hit point | agrees to 5.1e-05 units |
+| fetched corner attribute | bit-identical |
+| interpolated value (red) | agrees to 1.2e-07 |
+
+And yet applying the interpolation still fails the comparison. Four ablations
+place the fault precisely:
+
+| state | interior mismatches |
+| --- | --- |
+| infrastructure present, interpolation unused | **41** (passes) |
+| interpolation on reflection *and* indirect | 200 |
+| interpolation on the oracle's both, the device's reflection only | 1,121 |
+| bound | 41 |
+
+The first line clears the infrastructure completely: the geometry table, the
+bound index and vertex streams, the descriptor changes and the pool sizing
+cost nothing and change nothing. The third line is a control -- it confirms
+the two paths have to move together and that a mismatched pair is worth 900
+pixels, which is the scale a real divergence shows at.
+
+So the residual is 159 pixels beyond the bound, from an interpolation whose
+red channel agrees to a hundred-millionth. The probe compares one channel of
+one path. The obvious next step is to widen it: all three channels, and the
+reflection and indirect paths separately, which will say whether the
+disagreement is in a channel the probe does not watch or in the bounce rather
+than the specular term.
+
+Four causes have now been proposed for this and four eliminated -- different
+hits, sub-primitive hit points, a fetch defect, and the infrastructure itself.
+What is left is smaller than any of them and is not yet named. The instrument
+has been right every time and the theory has been wrong every time, which is
+the only durable lesson here: the next move is another lane, not another
+story.
