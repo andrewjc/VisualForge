@@ -266,10 +266,9 @@ Stated gaps, not silent ones:
   would mean inventing a ramp. The flags travel in the record.
 - **POM marching is not implemented.** Scale, bias, UV scale, and the step
   range are carried and validated; the march itself is not in the shader.
-- **The installed-corpus sweep has not been run.** The structural half of the
-  gate's first clause is satisfied by construction — the fallback path means
-  nothing can fail to resolve — but which families actually occur in
-  `Fallout4 - Materials.ba2`, and at what frequency, is not yet measured.
+- ~~The installed-corpus sweep has not been run.~~ Run: 6899 of 6899 entries
+  parsed exactly, and nine of twenty-three families occur. See "The corpus
+  sweep" below.
 
 ## Promotion decision
 
