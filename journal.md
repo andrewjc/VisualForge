@@ -3890,3 +3890,46 @@ The first is the correct one. It is a larger change than the goal's step 3
 described, and the goal's own "where I expect trouble" note -- that step 4 may
 be larger than it reads -- is now confirmed with a specific reason rather than
 a suspicion.
+
+## The outer shell was culled: the engine's cull mode was captured and dropped
+
+Reported from a live loading screen: rotating the object showed its interior
+rather than its outer shell. Not the winding this time -- the winding is read
+from the engine and was already right. The faces were being culled.
+
+Two facts, both in the code rather than inferred:
+
+- `cullMode` is captured from `RSSetState`, carried through `DrawRecordV1` and
+  into `AssembledMesh` -- and then read by nobody. `EngineDrawStream.cpp`
+  contained zero uses of it.
+- `AssembleSceneGeometry` never emitted a single visibility record, so
+  `ScenePacket::visibility` was always empty. The packet defines that as "every
+  object is opaque, front-facing only, and unmirrored".
+
+So every mirrored object was back-face culled however the engine had drawn it.
+A two-sided model loses its outer shell and shows its interior, which reads as
+inverted geometry rather than as a missing cull mode -- and that is the second
+time this session that a culling symptom has had a cause other than winding.
+
+The assembly now emits one record per surviving object:
+
+| engine | record |
+| --- | --- |
+| `D3D11_CULL_NONE` | `FaceMode::TwoSided` |
+| `D3D11_CULL_FRONT` | `FaceMode::BackOnly` |
+| `D3D11_CULL_BACK` | `FaceMode::FrontOnly` |
+| never observed | `FaceMode::FrontOnly`, D3D11's own default |
+
+`modelDeterminant` is filled from the object's transform at the same time. It
+had been left at 1.0, which told the backend no placement was ever mirrored;
+the backend already folds the determinant into the effective front face, so it
+was the mirror withholding the input rather than the backend ignoring it.
+
+Three mutations killed: two-sided falling through to front-only, front-cull
+falling through, and emitting no records at all. 387 tests pass in both
+configurations.
+
+Worth naming: the backend has honoured `faceMode` and `modelDeterminant` since
+phase 15. Everything needed to draw these objects correctly was already there,
+and the mirror simply never filled the fields in. That is the same shape as the
+texture library, the winding and the terrain -- offline-complete, live-empty.

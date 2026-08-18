@@ -1174,3 +1174,67 @@ TEST_CASE("P20_a_mesh_that_keeps_its_identity_but_changes_bytes_is_re_decoded",
     CHECK(packet.vertices[slot].position[0] == 5.0f);
     CHECK(packet.vertices[slot].position[1] == 5.0f);
 }
+
+TEST_CASE("P20_assembly_carries_the_engine_cull_mode_into_visibility",
+    "[drawstream][phase20]")
+{
+    // The engine's cull mode was captured all the way to AssembledMesh and
+    // then never read, and the scene packet left its visibility records empty
+    // -- which the packet defines as "every object is opaque, front-facing
+    // only, and unmirrored". Every mirrored object was therefore back-face
+    // culled whatever the engine did, so a two-sided model lost its outer
+    // shell and showed its interior instead.
+    const std::array<float, 9> positions{
+        0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const std::array<vf::renderer::mesh::InputElementDesc, 1> elements{{
+        {"POSITION", 0, vf::renderer::mesh::kFormatR32G32B32Float, 0, 0}}};
+
+    const auto assembleWith = [&](const std::uint32_t cullMode) {
+        scene::ScenePacket packet{};
+        packet.header.frameId = 1;
+        packet.header.viewId = 1;
+        scene::OpaqueObjectV1 object{};
+        object.objectId = 0x1000;
+        object.materialId = 0x2000;
+        object.flags = scene::ObjectWritesWorldTarget | scene::ObjectStatic;
+        object.boundsMinimum[0] = -1.0f;
+        object.boundsMaximum[0] = 1.0f;
+        object.model[0] = 1.0f;
+        object.model[5] = 1.0f;
+        object.model[10] = 1.0f;
+        object.model[15] = 1.0f;
+        object.geometricNormal[2] = 1.0f;
+        object.shadingNormal[2] = 1.0f;
+        packet.objects.push_back(object);
+
+        drawstream::AssembledMesh mesh{};
+        mesh.identity = object.objectId;
+        mesh.vertexStride = 12;
+        REQUIRE(vf::renderer::mesh::BuildLayoutFromInputElements(
+            elements, 12, 0, mesh.layout) ==
+            vf::renderer::mesh::VertexLayoutError::None);
+        mesh.vertices = std::as_bytes(std::span{positions});
+        mesh.indices = indices;
+        mesh.cullMode = cullMode;
+        const std::array<drawstream::AssembledMesh, 1> cache{mesh};
+
+        raster::DecodedPacket rasterPacket{};
+        drawstream::AssemblyResult assembly{};
+        REQUIRE(drawstream::AssembleSceneGeometry(packet, cache, rasterPacket,
+            assembly, nullptr) == drawstream::DrawStreamError::None);
+        REQUIRE(packet.visibility.size() == packet.objects.size());
+        return packet.visibility.front().faceMode;
+    };
+
+    // Every mode the engine can declare maps to the matching face mode, and
+    // an unobserved state takes D3D11's documented default of culling back.
+    CHECK(assembleWith(drawstream::kCullModeNone) ==
+        visibility::FaceMode::TwoSided);
+    CHECK(assembleWith(drawstream::kCullModeBack) ==
+        visibility::FaceMode::FrontOnly);
+    CHECK(assembleWith(drawstream::kCullModeFront) ==
+        visibility::FaceMode::BackOnly);
+    CHECK(assembleWith(drawstream::kCullModeUnknown) ==
+        visibility::FaceMode::FrontOnly);
+}

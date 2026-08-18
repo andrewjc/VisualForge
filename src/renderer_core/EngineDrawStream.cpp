@@ -715,6 +715,42 @@ DrawStreamError AssembleSceneGeometry(
         // rendered, so the caller rebuilds.
         packet.objects = std::move(keptObjects);
         packet.instances = std::move(keptInstances);
+
+        // One visibility record per surviving object, carrying what the
+        // engine actually declared.
+        //
+        // Leaving this empty means "opaque, front-facing only, and
+        // unmirrored" by the scene packet.s own definition, so every mirrored
+        // object was back-face culled however the engine drew it. A two-sided
+        // model then loses its outer shell and shows its interior, which
+        // reads as inverted geometry rather than as a missing cull mode.
+        packet.visibility.clear();
+        packet.visibility.reserve(packet.objects.size());
+        for (std::size_t slot = 0; slot < packet.objects.size(); ++slot) {
+            visibility::VisibilityRecordV1 record{};
+            record.objectId = packet.objects[slot].objectId;
+            record.materialId = packet.objects[slot].materialId;
+            switch (keptMeshes[slot]->cullMode) {
+            case kCullModeNone:
+                record.faceMode = visibility::FaceMode::TwoSided;
+                break;
+            case kCullModeFront:
+                record.faceMode = visibility::FaceMode::BackOnly;
+                break;
+            default:
+                // Back, and the unobserved case: D3D11 defaults to culling
+                // back, so a draw whose state was never seen is culled the
+                // way the runtime would have culled it.
+                record.faceMode = visibility::FaceMode::FrontOnly;
+                break;
+            }
+            // The placement.s handedness. A negatively scaled instance turns
+            // its triangles inside out, and the backend folds this into the
+            // front face rather than the mirror guessing a winding.
+            record.modelDeterminant = static_cast<float>(
+                UpperDeterminant(packet.objects[slot].model));
+            packet.visibility.push_back(record);
+        }
         packet.header.objectCount =
             static_cast<std::uint32_t>(packet.objects.size());
         packet.header.instanceCount =

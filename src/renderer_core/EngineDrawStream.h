@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_core/EngineScene.h"
+#include "renderer_core/EngineVisibility.h"
 #include "renderer_core/EngineVertex.h"
 
 #include <array>
