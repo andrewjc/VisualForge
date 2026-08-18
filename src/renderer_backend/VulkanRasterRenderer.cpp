@@ -691,6 +691,9 @@ struct VulkanRasterRenderer::Impl
     // particles into the G-buffer and make the reflection and indirect passes
     // treat them as opaque surfaces.
     bool independentBlendSupported{};
+    bool pipelineStatisticsSupported{};
+    VkQueryPool statisticsPool{VK_NULL_HANDLE};
+    std::uint64_t statisticsFragments{};
     bool ready{};
 
     void FillStatus(
@@ -1008,7 +1011,11 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
             vkDestroySampler(device, sampler, nullptr);
             sampler = VK_NULL_HANDLE;
         }
-        if (descriptorPool != VK_NULL_HANDLE) {
+        if (statisticsPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(device, statisticsPool, nullptr);
+        statisticsPool = VK_NULL_HANDLE;
+    }
+    if (descriptorPool != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device, descriptorPool, nullptr);
             descriptorPool = VK_NULL_HANDLE;
         }
@@ -1071,6 +1078,7 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
     phase13DeformActive = false;
     samplerAnisotropySupported = false;
     independentBlendSupported = false;
+    pipelineStatisticsSupported = false;
     beginLabel = nullptr;
     endLabel = nullptr;
     ready = false;
@@ -1226,6 +1234,8 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
             features.features.samplerAnisotropy == VK_TRUE;
         independentBlendSupported =
             features.features.independentBlend == VK_TRUE;
+        pipelineStatisticsSupported =
+            features.features.pipelineStatisticsQuery == VK_TRUE;
         descriptorIndexingSupported =
             selected12.descriptorIndexing != VK_FALSE &&
             selected12.runtimeDescriptorArray != VK_FALSE &&
@@ -1365,6 +1375,13 @@ abi::Result VulkanRasterRenderer::Impl::CreateDevice(
         enabledAccel.pNext = &enabledRayQuery;
     }
     VkPhysicalDeviceFeatures enabledFeatures{};
+    // Fragment-shader invocations, so overdraw can be counted rather than
+    // guessed at. The scene pass is the largest unattributed cost in a
+    // mirrored frame and a forward pass with no opaque depth prepass is the
+    // obvious suspect -- but "obvious" is what the last three performance
+    // hypotheses were.
+    enabledFeatures.pipelineStatisticsQuery = pipelineStatisticsSupported
+        ? VK_TRUE : VK_FALSE;
     enabledFeatures.independentBlend = independentBlendSupported
         ? VK_TRUE : VK_FALSE;
     enabledFeatures.samplerAnisotropy = samplerAnisotropySupported
@@ -1660,6 +1677,20 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
     if (vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr,
             &descriptorPool) != VK_SUCCESS) {
         return abi::Result::RasterCreateFailed;
+    }
+    // One statistics query, reset and rewritten every frame, read back a
+    // frame late so nothing waits on it.
+    if (pipelineStatisticsSupported) {
+        VkQueryPoolCreateInfo statisticsInfo{
+            VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        statisticsInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+        statisticsInfo.queryCount = 1;
+        statisticsInfo.pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
+        if (vkCreateQueryPool(device, &statisticsInfo, nullptr,
+                &statisticsPool) != VK_SUCCESS) {
+            statisticsPool = VK_NULL_HANDLE;
+        }
     }
     const std::array layouts{
         materialSetLayout, toneSetLayout, deformSetLayout,
@@ -5153,8 +5184,13 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     rendering.pColorAttachments = mirrorActive
         ? sceneAttachments.data() : &colorAttachment;
     rendering.pDepthAttachment = &depthAttachment;
+    if (statisticsPool != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(command, statisticsPool, 0, 1);
+        vkCmdBeginQuery(command, statisticsPool, 0, 0);
+    }
     vkCmdBeginRendering(command, &rendering);
     const VkViewport viewport{
+
         packet.header.viewportX,
         packet.header.viewportY,
         packet.header.viewportWidth,
@@ -5541,6 +5577,9 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     }
     vkCmdEndRendering(command);
     endRegion();
+    if (statisticsPool != VK_NULL_HANDLE) {
+        vkCmdEndQuery(command, statisticsPool, 0);
+    }
 
     if (phase13DeformActive) {
         const auto vertexBytes = deformPacket.vertices.size() *
@@ -6819,6 +6858,29 @@ abi::Result VulkanRasterRenderer::Render(
             message += std::to_string(window(impl_->frameDecodeUs, impl_->reportedDecodeUs));
             message += " upload-us=";
             message += std::to_string(window(impl_->frameUploadUs, impl_->reportedUploadUs));
+            // Fragment invocations across the scene pass, against the pixels
+            // the frame covers. A forward pass with no opaque depth prepass
+            // shades every fragment of every surface that reaches the raster,
+            // occluded or not, so this ratio is the overdraw the shader is
+            // paying for.
+            if (impl_->statisticsPool != VK_NULL_HANDLE) {
+                std::uint64_t fragments = 0;
+                if (vkGetQueryPoolResults(impl_->device,
+                        impl_->statisticsPool, 0, 1, sizeof(fragments),
+                        &fragments, sizeof(fragments),
+                        VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                    impl_->statisticsFragments = fragments;
+                }
+                const auto covered = static_cast<std::uint64_t>(
+                    packet.header.width) * packet.header.height;
+                message += " fragments=";
+                message += std::to_string(impl_->statisticsFragments);
+                message += " pixels=";
+                message += std::to_string(covered);
+                message += " overdraw-x100=";
+                message += std::to_string(covered != 0
+                    ? impl_->statisticsFragments * 100 / covered : 0);
+            }
             impl_->callbacks.log(
                 impl_->callbacks.userData, 1u, message.c_str());
         }

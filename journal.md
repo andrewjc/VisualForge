@@ -4447,3 +4447,54 @@ What remains unattributed is about 78 ms -- the base raster over 940 draws and
 1.19 M vertices into a five-attachment G-buffer at 720p, which is far more than
 that hardware should need. The ablation probe that separated the ray-traced
 terms is sound and can be pointed at it.
+
+## The scene pass is not the cost either: overdraw is 0.85x
+
+The next suspect for the unattributed 78 ms was the forward scene pass. There
+is no opaque depth prepass -- only alpha-tested draws get one -- so every
+opaque fragment runs the full family shader, and a settlement with 940 objects
+looked like it should be shading each pixel several times over. The fix would
+have been a full opaque prepass and a switch to `LESS_OR_EQUAL`, which is a
+real change to the core pass.
+
+A pipeline-statistics query settles it in one run instead:
+
+```text
+fragments=790797 pixels=921600 overdraw-x100=85
+```
+
+**0.85 fragments per pixel.** The scene does not even cover the screen once,
+let alone overdraw it. A depth prepass would have removed nothing, and the
+several hours it would have cost were saved by a query pool and one live run.
+That is the fourth performance hypothesis this session to be wrong, and the
+second to be wrong in a way that would have produced a large, confident,
+useless change.
+
+### Where the frame actually goes
+
+The same line carries the rest of it:
+
+```text
+record-us=55293 gpu-wait-us=45850 readback-us=318 prepare-us=34718
+upload-us=4123 acceleration-us=2877
+```
+
+`prepare-us` is **34 ms**, and it is the backend decoding the frame's packets:
+the raster packet alone is 66 MB. Every earlier reading of this was 0.27 ms,
+taken from runs where the mirror was refusing the frame for a missing material
+and never reaching the work. The number only became visible once the mirror
+started presenting -- which is a general hazard worth naming: a stage timer
+read while the stage is being skipped reports that the stage is free.
+
+So a mirrored frame is roughly a third host-side packet decoding, a bit over
+half device work, and a few per cent staging. Within the device half, the
+acceleration rebuild is about 17 ms and the three ray-traced terms together
+are about 2%.
+
+The decode has an established answer in this codebase. The texture library
+already carries a generation: the host says "this is the same library you
+already hold" and the backend skips the decode and the hash entirely, which
+took a hundred and fourteen textures out of every frame. The raster packet is
+encoded from a cache on the host and is byte-identical across most frames --
+the encode cache hits 96% of the time -- so the same declaration would let the
+backend keep the decoded packet instead of rebuilding it from 66 MB.
