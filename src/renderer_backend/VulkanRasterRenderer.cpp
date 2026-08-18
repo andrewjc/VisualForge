@@ -668,6 +668,8 @@ struct VulkanRasterRenderer::Impl
     std::uint64_t accelBlasBuilds{};
     std::uint64_t accelBlasSkips{};
     std::uint64_t accelBlasReanchors{};
+    std::vector<std::uint64_t> accelLastRotations;
+    std::vector<std::int64_t> accelLastTranslations;
     // One geometry per drawn instance, each carrying that instance's model
     // rows as a build-time transform. The packet's vertices are local space,
     // so a single identity geometry would trace a scene whose objects all sit
@@ -3170,8 +3172,14 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
         // it in float: the packet narrows against C every frame, so the low
         // bits jitter as the player walks even though the value does not
         // move. Hashing them exactly made every frame a rebuild and the
-        // anchoring bought nothing. A sixty-fourth of a unit is well under a
-        // millimetre at Fallout's scale and far above the jitter.
+        // anchoring bought nothing.
+        //
+        // A quarter of a unit, not a sixty-fourth. The camera origin is
+        // around 120,000 units out, where a float ulp is about 0.008, and the
+        // sum carries two such roundings -- which straddles a sixty-fourth
+        // and flipped the bucket from frame to frame anyway. A quarter unit
+        // is roughly four millimetres at Fallout's scale: far above the
+        // jitter and far below anything that has actually moved.
         for (std::size_t element = 0; element < transform.size(); ++element) {
             const auto translation = element == 3 || element == 7 ||
                 element == 11;
@@ -3191,6 +3199,73 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
     // Rebuilt only when what it describes changed. A settled cell reports
     // around 940 of 940 meshes unchanged, and with the anchor holding still
     // their anchor-relative placements are unchanged too.
+    // Which part of the signature moves, counted rather than reasoned about.
+    //
+    // Coarsening the translation quantum from a sixty-fourth of a unit to a
+    // quarter made the skip rate *fall* from 12% to 2%, which is the opposite
+    // of what a jitter story predicts and means the story was wrong. These
+    // three counters say whether the plan set, the rotations or the
+    // translations are what differs, so the next change can be aimed.
+    // Sampled, not per frame. Building the comparison costs a pass over every
+    // plan and the question it answers -- does this hold still -- is answered
+    // just as well against the previous sample as against the previous frame.
+    // The mesh-churn monitor is sampled for the same reason.
+    if ((accelBlasBuilds + accelBlasSkips) % 240 == 0) {
+        std::vector<std::uint64_t> nowRotations;
+
+        std::vector<std::int64_t> nowTranslations;
+        nowRotations.reserve(plans.size());
+        nowTranslations.reserve(plans.size() * 3);
+        for (const auto& plan : plans) {
+            auto transform = plan.transform;
+            transform[3] += anchorOffset[0];
+            transform[7] += anchorOffset[1];
+            transform[11] += anchorOffset[2];
+            std::uint64_t rotation = 0xCBF2'9CE4'8422'2325ull;
+            for (std::size_t element = 0; element < transform.size();
+                 ++element) {
+                if (element == 3 || element == 7 || element == 11) {
+                    nowTranslations.push_back(static_cast<std::int64_t>(
+                        std::llround(transform[element] * 64.0f)));
+                    continue;
+                }
+                std::uint32_t bits = 0;
+                std::memcpy(&bits, &transform[element], sizeof(bits));
+                rotation = (rotation ^ bits) * 0x0000'0100'0000'01B3ull;
+            }
+            nowRotations.push_back(rotation);
+        }
+        const auto sameCount = nowRotations.size() == accelLastRotations.size();
+        std::uint32_t rotationsChanged = 0;
+        std::uint32_t translationsChanged = 0;
+        if (sameCount) {
+            for (std::size_t index = 0; index < nowRotations.size(); ++index) {
+                if (nowRotations[index] != accelLastRotations[index]) {
+                    ++rotationsChanged;
+                }
+            }
+            for (std::size_t index = 0;
+                 index < nowTranslations.size() &&
+                 index < accelLastTranslations.size(); ++index) {
+                if (nowTranslations[index] != accelLastTranslations[index]) {
+                    ++translationsChanged;
+                }
+            }
+        }
+        if (callbacks.log != nullptr) {
+            std::string message{"acceleration-diff same-count="};
+            message += sameCount ? "yes" : "no";
+            message += " plans=";
+            message += std::to_string(plans.size());
+            message += " rotations-changed=";
+            message += std::to_string(rotationsChanged);
+            message += " translations-changed=";
+            message += std::to_string(translationsChanged);
+            callbacks.log(callbacks.userData, 1u, message.c_str());
+        }
+        accelLastRotations = std::move(nowRotations);
+        accelLastTranslations = std::move(nowTranslations);
+    }
     accelBlasBuildPending = reanchored || blasSignature != accelBlasSignature;
     accelBlasSignature = blasSignature;
     // Whether the skip actually fires. Anchoring is only worth anything if

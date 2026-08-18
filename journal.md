@@ -4553,3 +4553,47 @@ useless changes. Every one was settled by a measurement that cost a query pool
 or a frame flag. The two that were right, the packet generation and the
 acceleration rebuild, were both found by ablating a term and differencing
 against its neighbours rather than by reasoning about what ought to be slow.
+
+## Why the acceleration structure still rebuilds: 0.5% of it moves
+
+Anchoring made the structure's contents a function of the scene rather than of
+the camera, and it still rebuilt on 88% of frames. Two guesses at why were
+both wrong, and the second was wrong in the informative direction: coarsening
+the translation quantum from a sixty-fourth of a unit to a quarter made the
+skip rate *fall* from 12% to 2%. A float-jitter story predicts the opposite,
+so the story was wrong.
+
+Counting what actually differs, rather than reasoning about it:
+
+```text
+acceleration-diff same-count=yes plans=1137 rotations-changed=6 translations-changed=18
+acceleration-diff same-count=yes plans=1135 rotations-changed=2 translations-changed=6
+```
+
+**Six rotations of 1,137, and eighteen translation components of 3,411.**
+About half a per cent of the geometry moves between frames -- a door, a few
+pieces of animated clutter, whatever the engine is currently swapping -- and
+that handful invalidates a bottom level holding every drawn geometry. The plan
+count also drifts between 1,135 and 1,137, which invalidates it outright.
+
+So the quantum was never the question. The structure is one object and any
+part of it moving rebuilds all of it.
+
+The fix is the one phase 18's own doc named and this measurement now sizes: the
+static geometry needs its own bottom level, rebuilt only when its membership
+changes, and the movers need theirs, rebuilt every frame. Two structures and
+two top-level instances captures 99.5% of the saving without the bookkeeping of
+one structure per mesh. The prerequisite the doc said was missing -- stable
+geometry identity across frames -- is provided now by the arena and the
+identity ordering.
+
+The anchoring stays because a static bottom level is only static if its
+contents do not move with the camera, which is exactly what anchoring
+established. On its own it skips about one frame in eight.
+
+The diagnostic that answered this is sampled every 240 frames rather than run
+per frame: building the comparison costs a pass over every plan, and "does
+this hold still" is answered as well against the previous sample as against
+the previous frame. That is the same rule the mesh-churn monitor already
+follows, and it was worth applying before the instrument became part of the
+cost it was measuring.
