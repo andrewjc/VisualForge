@@ -3933,3 +3933,46 @@ Worth naming: the backend has honoured `faceMode` and `modelDeterminant` since
 phase 15. Everything needed to draw these objects correctly was already there,
 and the mirror simply never filled the fields in. That is the same shape as the
 texture library, the winding and the terrain -- offline-complete, live-empty.
+
+## Inside out, third cause: the view reverses the winding the engine declared
+
+Two-sided models had started rendering correctly and single-sided ones had not,
+which is the detail that separated this from the previous two culling bugs. A
+hat showed the inside of its crown; a deathclaw and a house looked right. The
+difference is not the model, it is that `CULL_NONE` keeps both faces whatever
+the winding says, so the visibility fix hid the remaining defect on exactly the
+objects that would have shown it.
+
+The engine declares a front face against its own clip space. The mirror
+re-projects those triangles through the captured view, and that view reverses
+orientation -- so the declared winding arrives inverted and every single-sided
+model is culled on the side it meant to keep.
+
+`view::ViewOrientationSign` derives this from the matrix rather than assuming
+it: the determinant of the upper-left 3x3 of the view-projection is negative
+exactly when the pair reverses handedness. A packet fixture, authored directly
+in packet space, gets +1 and is unaffected; a live capture gets -1 and has its
+declared winding flipped. One rule, correct for both, and no constant to guess
+at -- which matters, because guessing the polarity is what produced the first
+two wrong answers.
+
+Measured on the mirrored Sanctuary frame, over a fixed sample of 102,480
+pixels:
+
+| | tinted pixels | dominant colour |
+| --- | --- | --- |
+| before | 12.3% | flat `(0,188,188)`, 3,884 samples across two exact values |
+| after | 3.7% | scattered, the largest single colour 8 samples |
+
+The flat constant is gone entirely. A back-facing surface shaded to a single
+value across whole regions, which is why the symptom read as a colour bug and
+was chased as one -- the histogram said the colour was constant, and a constant
+is not something an albedo texture produces. That was the clue that mattered
+and it took two wrong theories to use it.
+
+What is left is diffuse and varied, and Sanctuary's houses are painted teal in
+vanilla, so some of the remaining 3.7% is the scene rather than a defect. It is
+not yet separated, and it is not claimed as fixed.
+
+Still missing: the landscape, which the mirror has never sent (phase 14 live
+promotion), so the ground below the horizon is still open sky.
