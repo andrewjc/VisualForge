@@ -3843,3 +3843,50 @@ Three things came out of it:
   right -- counting the format string as an argument, then counting commas
   inside comments -- and each time the fix was to make it disagree with the
   code for a reason, not to accept a clean result.
+
+## Phase 24 step 1: why the CPU round-trip exists
+
+The premise I wrote into the goal was wrong. It said the Phase 5 bridge "was
+built with shared images and a shared fence; the mirror simply does not use
+that path". The mirror cannot use it.
+
+Reading the bridge end to end, the D3D side is already right and already
+GPU-only:
+
+1. D3D signals the shared fence at `releaseValue`; Vulkan waits on it.
+2. The backend writes into the shared image `images[imageIndex]`.
+3. The backend signals `readyValue`.
+4. D3D calls `context4->Wait` -- a **GPU-side** wait, which does not block the
+   CPU -- and then `CopyResource` from the shared image to the backbuffer.
+
+There is no readback anywhere in the bridge. The round-trip is entirely inside
+the backend, and the reason is structural:
+
+```
+src/renderer_backend/VulkanInteropBridge.cpp:510   vkCreateDevice(...)
+src/renderer_backend/VulkanRasterRenderer.cpp:1350 vkCreateDevice(...)
+```
+
+`BackendContext` holds a `bridge` and a `raster`, and each creates its **own
+VkDevice**. The bridge's images are shared with D3D on the bridge's device; the
+frame is rendered on a different device. An image cannot cross that boundary,
+so the only route from one to the other is host memory -- which is exactly the
+readback and re-upload that costs the frame.
+
+So removing the round-trip is not "use the existing path". It needs one of:
+
+- **One device for the backend.** Both already select the physical device
+  carrying the engine's adapter LUID, so they are the same GPU; the merged
+  device needs the union of the features (external memory from the bridge,
+  ray tracing and descriptor indexing from the raster renderer), which the
+  physical device demonstrably supports because the raster renderer already
+  creates such a device today. This also deletes a duplicate device, queue and
+  allocator.
+- Or exporting the raster output as external memory and importing it into the
+  bridge device: a second interop hop between two devices on the same card,
+  which is more machinery to reach the same place.
+
+The first is the correct one. It is a larger change than the goal's step 3
+described, and the goal's own "where I expect trouble" note -- that step 4 may
+be larger than it reads -- is now confirmed with a specific reason rather than
+a suspicion.
