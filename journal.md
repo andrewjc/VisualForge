@@ -5303,3 +5303,43 @@ Retargeting is not something to do quietly -- the address library file the
 probe expects, `version-1-11-221-0.bin`, is also no longer present in the
 plugin directory. Every other test passes: 396 of 397 in both debug and
 release.
+
+## More than one reflection sample per pixel
+
+`ReflectionPolicy::samplesPerPixel` was declared and read by nothing on
+either side -- the header said so plainly and said what it was waiting for: a
+comparison able to exclude pixels whose hit geometry differs between the two
+intersectors. That comparison now exists, so the field is honoured. Both
+callers loop over the same indices of the same mirrored sequence, four
+directions each, and the hit reported to the G-buffer stays the *first*
+sample's: an average of four hits names no geometry, and the comparison that
+unblocked this needs one.
+
+The feared cost did not appear. `divergent-hits` stays at **0** with four
+rays where it was 0 with one, because only the first ray's hit is reported.
+The term moves from `0.00167` to `0.00190` -- 14%, so the extra directions
+change the integral -- and the two sides agree to 0.30%.
+
+### A count is not something to infer from an average
+
+The obvious mutation is a device integrating a different number of directions
+than the reference. It **passed**: three against four moves the specular term
+by 4.5%, under the 5% bound, reading as sampling noise. That is not a bad
+bound, it is the wrong instrument -- an average over N samples is precisely
+the statistic built to be insensitive to N.
+
+The count exists as an integer on both sides, so it is compared as one. Two
+of this policy's fields live twice, here and as constants in the shader,
+because the device has no uniform carrying them, and nothing had ever checked
+that the two copies agree. A test now reads the shader source and pins both:
+
+| mutation | verdict |
+| --- | --- |
+| none | pass |
+| shader samples 3, policy 4 | **fail** |
+| shader cutoff 0.70, policy 0.65 | **fail** |
+| device reuses sample index 0 four times | **fail** (12.3% / 8.9%) |
+
+The roughness cutoff had the same exposure and was never checked either; it
+is pinned by the same test. 397 of 398 pass in both configurations, the one
+failure being the build probe against the updated game.

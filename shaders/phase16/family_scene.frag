@@ -162,21 +162,37 @@ void main()
     uint reflectionSource;
     uint reflectionHitObject = 0u;
     uint reflectionHitPrimitive = 0u;
-    reflection = vfReflection(
-        vertexCameraRelative,
-        geometric,
-        shading,
-        normalize(-vertexCameraRelative),
-        shaded,
-        roughness,
-        vfMetalness(familyRecord),
-        vfSampleSequence(uint(gl_FragCoord.x), uint(gl_FragCoord.y),
-            0u, 0u),
-        vec3(0.0),
-        false,
-        reflectionSource,
-        reflectionHitObject,
-        reflectionHitPrimitive);
+    // The lobe is integrated over several directions rather than one. The
+    // hit reported to the G-buffer stays the first sample's: it exists so a
+    // contract can ask whether the two sides found the same geometry before
+    // it compares radiance, and an average of four hits names none of them.
+    for (uint sampleIndex = 0u;
+         sampleIndex < kVfReflectionSamplesPerPixel; ++sampleIndex) {
+        uint sampleSource = 0u;
+        uint sampleObject = 0u;
+        uint samplePrimitive = 0u;
+        reflection += vfReflection(
+            vertexCameraRelative,
+            geometric,
+            shading,
+            normalize(-vertexCameraRelative),
+            shaded,
+            roughness,
+            vfMetalness(familyRecord),
+            vfSampleSequence(uint(gl_FragCoord.x), uint(gl_FragCoord.y),
+                0u, sampleIndex),
+            vec3(0.0),
+            false,
+            sampleSource,
+            sampleObject,
+            samplePrimitive);
+        if (sampleIndex == 0u) {
+            reflectionSource = sampleSource;
+            reflectionHitObject = sampleObject;
+            reflectionHitPrimitive = samplePrimitive;
+        }
+    }
+    reflection /= float(kVfReflectionSamplesPerPixel);
 #endif
     // One bounce of diffuse indirect, traced against the same structure.
     vec3 indirect = vec3(0.0);

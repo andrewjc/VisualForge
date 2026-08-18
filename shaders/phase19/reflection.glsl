@@ -13,6 +13,11 @@ const float kVfSunLobeExponent = 64.0;
 // quality policy, deliberately not material semantics: a preset changes them
 // without rewriting a single captured material record.
 const float kVfReflectionRoughnessCutoff = 0.65;
+// Mirrors `ReflectionPolicy::samplesPerPixel`, the same way the cutoff above
+// mirrors `roughnessCutoff`: a compile-time constant on this side and a
+// default on the other, because the two must agree or they integrate
+// different numbers of directions and no bound can tell that from an error.
+const uint kVfReflectionSamplesPerPixel = 4u;
 const float kVfReflectionMaximumDistance = 4096.0;
 
 const uint kVfReflectionSkipped = 0u;

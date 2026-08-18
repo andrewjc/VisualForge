@@ -56,6 +56,10 @@ target_link_libraries(vf_unit_tests PRIVATE
     Catch2::Catch2WithMain
 )
 
+target_compile_definitions(vf_unit_tests PRIVATE
+    VF_SHADER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../shaders"
+)
+
 if(VF_GAME_ROOT)
     target_compile_definitions(vf_unit_tests PRIVATE
         VF_GAME_ROOT="${VF_GAME_ROOT}"

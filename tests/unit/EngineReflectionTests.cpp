@@ -7,6 +7,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
 using namespace vf::renderer;
@@ -736,4 +741,45 @@ TEST_CASE("P19_a_reflection_hit_samples_the_material_texture",
     REQUIRE(hitB.hit);
     CHECK(hitB.albedo[2] > 0.9f);
     CHECK(hitB.albedo[0] < 0.1f);
+}
+
+TEST_CASE("P19_the_shader_mirrors_the_reflection_policy_defaults",
+    "[phase19][reflection]")
+{
+    // Two of this policy's fields exist twice: once here and once as a
+    // constant in the shader, because the device has no uniform carrying
+    // them. Nothing made the two agree, and nothing noticed when they did
+    // not -- a device integrating three directions against a reference
+    // integrating four moves the specular term by 4.5%, which sits under
+    // every bound the contract sets and reads as sampling noise.
+    //
+    // A count is an integer both sides know. Comparing it directly is what
+    // this does; inferring it from an averaged radiance is asking the one
+    // statistic designed to be insensitive to sample count whether the
+    // sample count is right.
+    const std::filesystem::path shaders{VF_SHADER_SOURCE_DIR};
+    std::ifstream source{shaders / "phase19" / "reflection.glsl"};
+    REQUIRE(source.is_open());
+    const std::string text{std::istreambuf_iterator<char>{source},
+        std::istreambuf_iterator<char>{}};
+
+    const auto declared = [&text](const std::string& declaration) {
+        const auto begin = text.find(declaration);
+        REQUIRE(begin != std::string::npos);
+        const auto end = text.find(';', begin);
+        REQUIRE(end != std::string::npos);
+        auto value = text.substr(begin + declaration.size(),
+            end - begin - declaration.size());
+        // Trailing `u` on an unsigned literal is not part of the number.
+        while (!value.empty() && (value.back() == 'u' || value.back() == 'f')) {
+            value.pop_back();
+        }
+        return std::stod(value);
+    };
+
+    const reflect::ReflectionPolicy policy{};
+    CHECK(declared("const uint kVfReflectionSamplesPerPixel = ") ==
+        Catch::Approx(static_cast<double>(policy.samplesPerPixel)));
+    CHECK(declared("const float kVfReflectionRoughnessCutoff = ") ==
+        Catch::Approx(static_cast<double>(policy.roughnessCutoff)));
 }

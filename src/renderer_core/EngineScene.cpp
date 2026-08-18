@@ -1621,27 +1621,50 @@ ScenePacketError RenderReferenceGBuffer(
                                     ClassRoughness(family, object.roughness);
                                 reflective.metalness =
                                     ReferenceMetalness(family);
-                                const auto reflected =
-                                    reflect::EvaluateReflection(reflective,
-                                        inputs.reflectionPolicy,
-                                        inputs.reflectionGeometry,
-                                        inputs.lights,
-                                        inputs.environment != nullptr
-                                            ? *inputs.environment
-                                            : lighting::GpuEnvironmentV1{},
-                                        reflect::SampleSequence(x, y, 0, 0),
-                                        {0.0f, 0.0f, 0.0f}, false);
-                                reflection = reflected.radiance;
-                                // What this ray found, recorded beside the
-                                // radiance so a contract can ask whether the
-                                // two intersectors agree about the ray before
-                                // it asks whether they agree about the light.
-                                destination.reserved[0] =
-                                    static_cast<float>(reflected.source);
-                                destination.reserved[1] = static_cast<float>(
-                                    reflected.hitObjectIndex);
-                                destination.reserved[2] = static_cast<float>(
-                                    reflected.hitPrimitiveIndex);
+                                // The lobe over as many directions as the
+                                // policy asks for, walking the same sequence
+                                // the shader walks so the two integrate one
+                                // set of directions rather than two
+                                // estimates of the same integral.
+                                const auto samples = std::max<std::uint32_t>(
+                                    1, inputs.reflectionPolicy
+                                        .samplesPerPixel);
+                                for (std::uint32_t sampleIndex = 0;
+                                     sampleIndex < samples; ++sampleIndex) {
+                                    const auto reflected =
+                                        reflect::EvaluateReflection(reflective,
+                                            inputs.reflectionPolicy,
+                                            inputs.reflectionGeometry,
+                                            inputs.lights,
+                                            inputs.environment != nullptr
+                                                ? *inputs.environment
+                                                : lighting::GpuEnvironmentV1{},
+                                            reflect::SampleSequence(x, y, 0,
+                                                sampleIndex),
+                                            {0.0f, 0.0f, 0.0f}, false);
+                                    for (std::size_t channel = 0;
+                                         channel < 3; ++channel) {
+                                        reflection[channel] +=
+                                            reflected.radiance[channel] /
+                                            static_cast<float>(samples);
+                                    }
+                                    if (sampleIndex != 0) continue;
+                                    // What the first ray found, recorded
+                                    // beside the radiance so a contract can
+                                    // ask whether the two intersectors agree
+                                    // about the ray before it asks whether
+                                    // they agree about the light. The first
+                                    // rather than an average, which would
+                                    // name no geometry at all.
+                                    destination.reserved[0] =
+                                        static_cast<float>(reflected.source);
+                                    destination.reserved[1] =
+                                        static_cast<float>(
+                                            reflected.hitObjectIndex);
+                                    destination.reserved[2] =
+                                        static_cast<float>(
+                                            reflected.hitPrimitiveIndex);
+                                }
                             }
                             // One bounce of diffuse indirect, over the same
                             // geometry the reflection traces.

@@ -62,24 +62,24 @@ struct ReflectionPolicy
     float maximumDistance{4096.0f};
     // A ray shorter than this cannot leave the surface it started on.
     float minimumDistance{0.0f};
-    // Declared and honoured by nothing, on either side.
+    // Honoured by both sides. The caller loops, drawing each direction from
+    // `SampleSequence`, and the shader loops over the same indices.
     //
-    // This is stated here because the phase document claimed the oracle
-    // honoured it and only the shader traced once, and that was not true:
-    // `EvaluateReflection` takes one sample and averages nothing, and no
-    // caller loops. A field the contract carries and no evaluation reads is
-    // exactly the shape of a declaration that looks implemented.
+    // This was held back for want of a comparison that could exclude pixels
+    // whose hit geometry differs between the two intersectors -- averaging N
+    // rays multiplies those against bounds set for one. That comparison now
+    // exists: the hit each side found is reported and compared before any
+    // radiance is, and the specular term is measured over the pixels they
+    // agree about.
     //
-    // Wiring it is not just a loop. Both sides would draw from
-    // `SampleSequence`, which is mirrored and would agree, but each extra
-    // sample is another traced ray, and a ray-triangle decision at an edge is
-    // not bit-identical between this oracle and the hardware intersector.
-    // Averaging N of them multiplies the pixels where the two legitimately
-    // disagree, against bounds that were set for one. That is the same wall
-    // the per-hit attribute work ran into, and it wants the same thing first:
-    // a comparison that can exclude pixels whose hit geometry differs between
-    // the two, the way the silhouette comparison already excludes edges.
-    std::uint32_t samplesPerPixel{1};
+    // The hit identity reported alongside stays the first sample's. An
+    // average of four hits names no geometry, and the comparison that
+    // unblocked this needs one.
+    // Four, mirrored by `kVfReflectionSamplesPerPixel` in
+    // shaders/phase19/reflection.glsl. The two must agree: integrating a
+    // different number of directions on each side is a difference no bound
+    // can distinguish from a shading error.
+    std::uint32_t samplesPerPixel{4};
     // Growth added to a cone's spread by the pixel footprint itself, in
     // radians per pixel. Zero would make every mip selection pick mip 0 and
     // alias the moment the reflection is minified.
