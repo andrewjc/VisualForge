@@ -324,3 +324,18 @@ quarter of the pixels. The three ways forward -- exclude a quarter of the
 frame, compare the bounce statistically as a stochastic estimator, or have the
 reference trace against the device's own structure -- are judgements about
 what this contract is for.
+
+## Exclusion ruled out
+
+Excluding pixels whose bounce diverges removes `hdr-excluded=13689` pixels --
+exactly the lit-pixel count. Every lit pixel in the frame has at least one of
+its eight bounce rays hitting different geometry on the two sides. What
+survives the exclusion is background, agreeing to `2e-05` because nothing was
+traced there.
+
+So a per-hit attribute cannot be verified by excluding the divergence, and it
+cannot be verified by widening a count either. It needs either a statistical
+comparison of the bounce -- which `contract.indirect_accumulation` already
+demonstrates for histories -- or a reference that traces against the device's
+own acceleration structure. The reflection half of the path is measured clean
+to `5e-08` and is not the obstacle.

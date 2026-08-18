@@ -4989,3 +4989,52 @@ bound, and if it moves, something has changed about how the two trace.
 Six candidates proposed for this disagreement and six eliminated before the
 seventh was found by probing the one path nobody had instrumented. The
 reflection path was measured exhaustively and was innocent throughout.
+
+## Exclusion is not an option: every lit pixel has a divergent bounce
+
+The three ways forward for a per-hit attribute were exclude, compare
+statistically, or make the two intersectors agree. Exclusion was the cheapest
+and it was tried first. It is dead, and the measurement that killed it is
+unambiguous.
+
+Excluding pixels whose bounce summary differs, over the whole frame:
+
+```text
+hdr-differing=0 hdr-excluded=13689 hdr-max-error=2.19718e-05
+```
+
+`hdr-excluded` is **exactly `lit-pixels`**. Every single lit pixel is
+excluded. What remains is background, where the two agree to 2e-05 for the
+trivial reason that nothing was traced there. The comparison passes and tests
+nothing.
+
+The earlier 23.5% was 9,877 of 41,981 *interior* pixels, and the interior set
+is mostly unlit background where both sides write a zero probe and trivially
+agree. Measured against the lit pixels alone, the divergence is total: eight
+stochastic rays over a hemisphere, and the two intersectors do not agree about
+all eight for a single lit pixel in the frame.
+
+That is not a defect and it is not fixable by a bound. It is what sampling a
+hemisphere eight times on two different intersectors does.
+
+So of the three options, one is gone and the remaining two are the real
+choice:
+
+- **Compare the bounce statistically** -- mean and variance over a region
+  rather than pixel for pixel. This is what a stochastic estimator supports,
+  and phase 20's `contract.indirect_accumulation` already does exactly this
+  for histories, so the precedent and the machinery both exist here.
+- **Make the reference trace against the device's structure** rather than its
+  own triangles, so there is one intersector and nothing to disagree.
+
+Both are real work and both change what the contract means. Neither is a
+tolerance. The count bound was left at 1/1000 and the interpolation was not
+landed, because landing it needs one of those two and choosing between them is
+a decision about what this phase is verifying.
+
+What the session produced here is the characterisation, and it is complete:
+seven candidate causes proposed, six eliminated by measurement, and the
+seventh -- stochastic bounce divergence over eight rays -- measured at 100% of
+lit pixels. The reflection path was cleared to five parts in a hundred million
+along the way, so when the bounce question is settled, that half is known
+good.
