@@ -259,3 +259,37 @@ tested function with no caller otherwise reads as an oversight.
 What the measurement does say is where the time actually goes: `prepare-us`
 (every packet decode and texture preparation) is 0.27 ms and `upload-us` is
 0.07 ms, so neither decoding nor staging the scene is the cost. The GPU is.
+
+## Correction: the rebuild does cost, and the earlier dismissal used the wrong timer
+
+The section above closed the rebuild-every-frame gap on `acceleration-us=109`,
+concluding that the whole build was a tenth of a millisecond and that refit
+machinery would buy nothing. **That was the wrong number.** `frameAccelerationUs`
+brackets the host call that *records* the build command; the build executes on
+the queue afterwards and lands in `gpu-wait`, where it is indistinguishable
+from everything else.
+
+Measured properly, by declining the rebuild for a window and differencing
+against adjacent all-on windows on the same cell:
+
+```text
+renderer-term-ab: all-on-us=98987 no-bounce-us=97267 no-reflection-us=98911
+                  no-shadow-us=97544 no-accel-us=80103
+```
+
+**About 19 ms of a 99 ms frame, or a fifth of it.** For comparison, the three
+ray-traced terms the structure exists to serve -- the diffuse bounce, the
+specular bounce and the shadow ray per light -- are each within 2% of all-on.
+The renderer spends far more building the structure than tracing against it.
+
+So the deferred item's premise holds after all, and `DecideBuild` and
+`ShouldCompact` have a real caller waiting. The mesh-churn monitor already
+reports around 940 of 940 meshes unchanged in a settled cell, which is exactly
+the case a rebuild does not need to happen for.
+
+Caveat on the evidence: `no-accel` is one settled 120-frame window, because the
+ablation cycles through five states and a run reaches term four about twice.
+The other four terms each have several windows and agree with each other. This
+one wants confirming before the 19 ms is quoted as settled, and the ablation
+leaves the structures describing the previous frame, so it is a measurement
+device and not a mode anything should ship in.

@@ -364,15 +364,16 @@ constexpr const char* kMirrorLightBufferName = "cbVolume";
 // the same light keeps the same identity from frame to frame.
 constexpr std::uint64_t kMirrorSunLightId = 0x53554E0000000001ull;
 constexpr std::uint64_t kMirrorMoonLightId = 0x4D4F4F4E00000001ull;
-// Which half of the diffuse-bounce A/B this window is rendering.
-bool s_mirrorIndirectDisabled = false;
-std::uint64_t s_mirrorIndirectOnUs = 0;
-std::uint64_t s_mirrorIndirectOffUs = 0;
+// Which term this window ablates: 0 none, 1 the diffuse bounce, 2 the
+// specular one. Cycled so each is compared against a neighbouring window
+// with everything on, two seconds apart and looking at the same scene.
+std::uint32_t s_mirrorAblatedTerm = 0;
+std::uint64_t s_mirrorTermUs[5] = {0, 0, 0, 0, 0};
+std::uint64_t s_mirrorTermSettled[5] = {0, 0, 0, 0, 0};
+std::uint32_t s_mirrorLastAblation = 4;
 std::uint64_t s_mirrorWindowUs = 0;
 std::uint64_t s_mirrorWindowSettled = 0;
 std::uint64_t s_mirrorWindowFrames = 0;
-std::uint64_t s_mirrorIndirectOnSettled = 0;
-std::uint64_t s_mirrorIndirectOffSettled = 0;
 // The frame's light packet, empty whenever the sun could not be resolved.
 // Empty is a real answer: the backend then has no environment and leaves the
 // albedo alone, which is correct behaviour for a session whose volumetric
@@ -612,9 +613,19 @@ void BuildMirrorLighting()
     // between windows and reporting both means costs one run instead of two
     // and compares them under the same cell, the same camera and the same
     // resident set.
-    if (s_mirrorIndirectDisabled) {
+    // One term at a time, alternated in windows. The bounce was measured this
+    // way and came out under one per cent, which left the frame's 96 ms
+    // unattributed -- so the same switch now exists for the specular term and
+    // the probe walks both.
+    if (s_mirrorAblatedTerm == 1) {
         packet.environment.flags |= lighting::EnvironmentIndirectDisabled;
+    } else if (s_mirrorAblatedTerm == 2) {
+        packet.environment.flags |= lighting::EnvironmentReflectionDisabled;
+    } else if (s_mirrorAblatedTerm == 3) {
+        packet.environment.flags |= lighting::EnvironmentShadowsDisabled;
     }
+    // Term 4 is not an environment flag: the acceleration rebuild is declined
+    // through the frame request, so it is applied where the request is built.
     // As a light, not only as environment metadata. The shading reads the
     // ambient term and the light list; the environment's own sunDirection and
     // sunColor are carried for provenance but nothing evaluates them, so a
@@ -2471,6 +2482,9 @@ bool CompositeMirrorImpl(
 
     abi::RasterFrameRequestV1 request{};
     request.structSize = sizeof(request);
+    if (s_mirrorAblatedTerm == 4) {
+        request.flags |= abi::RasterFrameSkipAccelerationBuild;
+    }
     // No declared bounce count, which the backend reads as the contract's
     // eight.
     //
@@ -2577,27 +2591,27 @@ bool CompositeMirrorImpl(
     if (s_mirrorWindowFrames == kWindowFrames) {
         const auto mean = s_mirrorWindowSettled != 0
             ? s_mirrorWindowUs / s_mirrorWindowSettled : 0ull;
-        if (s_mirrorIndirectDisabled) {
-            s_mirrorIndirectOffUs = mean;
-            s_mirrorIndirectOffSettled = s_mirrorWindowSettled;
-        } else {
-            s_mirrorIndirectOnUs = mean;
-            s_mirrorIndirectOnSettled = s_mirrorWindowSettled;
-        }
+        s_mirrorTermUs[s_mirrorAblatedTerm] = mean;
+        s_mirrorTermSettled[s_mirrorAblatedTerm] = s_mirrorWindowSettled;
         s_mirrorWindowUs = 0;
         s_mirrorWindowSettled = 0;
         s_mirrorWindowFrames = 0;
-        s_mirrorIndirectDisabled = !s_mirrorIndirectDisabled;
-        // Both halves must have produced a window, and enough settled frames
-        // in each for the mean to mean anything.
-        if (s_mirrorIndirectOnSettled >= 60 &&
-            s_mirrorIndirectOffSettled >= 60) {
-            log::Write("renderer-indirect-ab: on-settled=%llu on-mean-us=%llu "
-                "off-settled=%llu off-mean-us=%llu",
-                static_cast<unsigned long long>(s_mirrorIndirectOnSettled),
-                static_cast<unsigned long long>(s_mirrorIndirectOnUs),
-                static_cast<unsigned long long>(s_mirrorIndirectOffSettled),
-                static_cast<unsigned long long>(s_mirrorIndirectOffUs));
+        // none -> bounce off -> none -> reflection off, so every ablated
+        // window has an all-on window immediately beside it.
+        s_mirrorAblatedTerm = s_mirrorAblatedTerm == 0
+            ? (s_mirrorLastAblation >= 4 ? 1u : s_mirrorLastAblation + 1u)
+            : 0u;
+        if (s_mirrorAblatedTerm != 0) s_mirrorLastAblation = s_mirrorAblatedTerm;
+        if (s_mirrorTermSettled[0] >= 60 && s_mirrorTermSettled[1] >= 60 &&
+            s_mirrorTermSettled[2] >= 60 && s_mirrorTermSettled[3] >= 60 &&
+            s_mirrorTermSettled[4] >= 60) {
+            log::Write("renderer-term-ab: all-on-us=%llu no-bounce-us=%llu "
+                "no-reflection-us=%llu no-shadow-us=%llu no-accel-us=%llu",
+                static_cast<unsigned long long>(s_mirrorTermUs[0]),
+                static_cast<unsigned long long>(s_mirrorTermUs[1]),
+                static_cast<unsigned long long>(s_mirrorTermUs[2]),
+                static_cast<unsigned long long>(s_mirrorTermUs[3]),
+                static_cast<unsigned long long>(s_mirrorTermUs[4]));
         }
     }
     if (!renderOk) {

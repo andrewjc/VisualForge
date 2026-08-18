@@ -172,6 +172,11 @@ const uint kVfEnvironmentPresent = 2u;
 // to it. Without it the bounce arrives alongside every other ray-traced term
 // and none of them can be measured alone.
 const uint kVfEnvironmentIndirectDisabled = 4u;
+// The same switch for the specular bounce. Mirrors
+// lighting::EnvironmentReflectionDisabled.
+const uint kVfEnvironmentReflectionDisabled = 8u;
+// Mirrors lighting::EnvironmentShadowsDisabled.
+const uint kVfEnvironmentShadowsDisabled = 16u;
 
 const uint kVfShaderClassStandard = 1u;
 const uint kVfShaderClassSkin = 2u;

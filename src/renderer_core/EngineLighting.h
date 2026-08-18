@@ -44,6 +44,16 @@ enum EnvironmentFlag : std::uint32_t
     // one term. Without this the bounce arrives with every other term and
     // none of them can be measured alone.
     EnvironmentIndirectDisabled = 1u << 2,
+    // The same switch for the specular bounce, so the two ray-traced terms
+    // can be separated from each other and from everything else. Without it
+    // the only term a frame could be rendered without was the diffuse one,
+    // and a frame time that did not move when it was removed said nothing
+    // about which of the remaining terms held it.
+    EnvironmentReflectionDisabled = 1u << 3,
+    // And for the shadow ray, which is cast once per light per pixel and is
+    // the only ray-traced term the other two switches leave running. Without
+    // it "the ray-traced terms are cheap" would still have a term in it.
+    EnvironmentShadowsDisabled = 1u << 4,
 };
 
 enum class LightError : std::uint8_t

@@ -405,6 +405,15 @@ ReflectionResult EvaluateReflection(
     const bool probeAvailable) noexcept
 {
     ReflectionResult result{};
+    // Switched off for the frame. Exactly nothing rather than a small
+    // residue, for the same reason the diffuse switch gives nothing: a term
+    // that is almost off still moves every pixel it touches, and an isolation
+    // built on it measures the remainder rather than the term it removed.
+    if ((environment.flagsAndCount[0] &
+        lighting::EnvironmentReflectionDisabled) != 0) {
+        result.source = ReflectionSource::Skipped;
+        return result;
+    }
     auto normal = surface.shadingNormal;
     auto view = surface.viewDirection;
     if (!Normalize(normal) || !Normalize(view)) return result;

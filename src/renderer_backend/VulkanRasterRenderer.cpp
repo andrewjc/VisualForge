@@ -4561,6 +4561,17 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     // Built here, after the upload buffer exists and holds this frame.s
     // geometry. Building earlier would take the device address of a buffer
     // that has not been created yet, let alone filled.
+    //
+    // The frame may also decline the rebuild, leaving the structures holding
+    // the previous frame's geometry. That is an ablation, not a feature: it
+    // exists so the build's *device* cost can be separated. The timer around
+    // this call cannot do that -- it measures the microseconds spent
+    // recording the command, and the build runs on the queue afterwards.
+    // Reading the recording cost as the build cost is how this was previously
+    // dismissed as costing a tenth of a millisecond.
+    if ((frameFlags & abi::RasterFrameSkipAccelerationBuild) != 0) {
+        // Nothing to record: the structures stand as the last frame left them.
+    } else
     {
         const auto accelerationStarted = std::chrono::steady_clock::now();
         const auto built = BuildAccelerationStructures(packet, layout);

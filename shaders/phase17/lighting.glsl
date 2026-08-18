@@ -146,6 +146,13 @@ void vfShadowRayForLight(
 // stop at the first one instead of walking the whole ray.
 float vfShadowTerm(GpuLightRecordV1 light, vec3 position, vec3 normal)
 {
+    // Switched off for the frame, mirroring lighting::ShadeSurfaceGpu. Fully
+    // lit rather than fully shadowed: an isolation must remove the term, and
+    // shadowing everything removes the light as well.
+    if ((sceneEnvironment.record.flagsAndCount.x &
+        kVfEnvironmentShadowsDisabled) != 0u) {
+        return 1.0;
+    }
     vec3 origin;
     vec3 direction;
     float maximumDistance;

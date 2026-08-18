@@ -228,7 +228,12 @@ enum RasterFrameFlag : std::uint32_t
     // from surfaces the composite render did not have. The two then differed
     // by the blended layer plus a different set of occluders, which is not
     // what the comparison claims to measure.
-    RasterFrameSuppressTransparentComposite = 1u << 1
+    RasterFrameSuppressTransparentComposite = 1u << 1,
+    // Records the frame without rebuilding the acceleration structures.
+    // An ablation for measurement: the build is recorded on the host in a
+    // tenth of a millisecond and executed on the queue, so the timer around
+    // the recording says nothing about what the build costs the device.
+    RasterFrameSkipAccelerationBuild = 1u << 2
 };
 
 struct alignas(8) RasterCreateRequestV1

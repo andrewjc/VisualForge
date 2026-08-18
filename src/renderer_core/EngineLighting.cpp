@@ -546,7 +546,14 @@ std::array<float, 3> ShadeSurfaceGpu(
     for (std::size_t index = 0; index < count; ++index) {
         auto direct = EvaluateDirectGpu(lights[index], position, normal);
         // Ambient is not cast from anywhere, so no ray of it can be blocked.
-        if (index < shadow.size() &&
+        //
+        // The frame may also switch shadowing off outright, which leaves every
+        // light fully unoccluded. Fully lit rather than fully shadowed: an
+        // isolation has to remove the term, and shadowing everything removes
+        // the light with it.
+        const auto shadowed = (environment.flagsAndCount[0] &
+            EnvironmentShadowsDisabled) == 0;
+        if (shadowed && index < shadow.size() &&
             ClassifyGpuLight(lights[index]) != LightType::Ambient) {
             for (auto& channel : direct) channel *= shadow[index];
         }

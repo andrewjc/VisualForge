@@ -532,3 +532,49 @@ TEST_CASE("P19_reflections_trace_geometry_and_fall_back_by_policy",
         selfPlane, lights, environment, {0.5f, 0.5f}, probe, false);
     CHECK(notItself.source != reflect::ReflectionSource::Geometry);
 }
+
+TEST_CASE("P19_reflections_can_be_switched_off_for_a_frame",
+    "[phase19][reflection]")
+{
+    // The diffuse bounce has had a frame switch since phase 20, and the
+    // comment on it argues that every ray-traced term needs one: without it
+    // the terms arrive together and none can be measured alone. Reflections
+    // did not have one, which is why the mirrored frame's 96 ms could be
+    // attributed to the bounce and to nothing else.
+    //
+    // Exactly nothing rather than a small residue, for the same reason the
+    // bounce switch gives nothing: a term that is almost off still moves every
+    // pixel it touches, and an isolation built on it measures the remainder.
+    reflect::ReflectionSurface surface{};
+    surface.position = {0.0f, 0.0f, 0.0f};
+    surface.geometricNormal = {0.0f, 0.0f, 1.0f};
+    surface.shadingNormal = {0.0f, 0.0f, 1.0f};
+    surface.viewDirection = {0.0f, 0.0f, 1.0f};
+    surface.baseColor = {1.0f, 1.0f, 1.0f};
+    surface.roughness = 0.0f;
+    surface.metalness = 1.0f;
+
+    reflect::ReflectionPolicy policy{};
+    lighting::GpuEnvironmentV1 environment{};
+    environment.flagsAndCount[0] = lighting::EnvironmentPresent;
+    environment.ambientAndFogNear[0] = 1.0f;
+    environment.ambientAndFogNear[1] = 1.0f;
+    environment.ambientAndFogNear[2] = 1.0f;
+    environment.fogColorAndPower[3] = 1.0f;
+    environment.sunDirectionAndFogFar[3] = 1000.0f;
+
+    const std::array<float, 2> sample{0.5f, 0.5f};
+    const std::array<float, 3> probe{2.0f, 2.0f, 2.0f};
+    const auto lit = reflect::EvaluateReflection(surface, policy, {}, {},
+        environment, sample, probe, true);
+    // The frame reflects something, or switching it off proves nothing.
+    CHECK((lit.radiance[0] > 0.0f || lit.radiance[1] > 0.0f ||
+        lit.radiance[2] > 0.0f));
+
+    environment.flagsAndCount[0] |= lighting::EnvironmentReflectionDisabled;
+    const auto dark = reflect::EvaluateReflection(surface, policy, {}, {},
+        environment, sample, probe, true);
+    CHECK(dark.radiance[0] == 0.0f);
+    CHECK(dark.radiance[1] == 0.0f);
+    CHECK(dark.radiance[2] == 0.0f);
+}

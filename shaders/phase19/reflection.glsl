@@ -196,6 +196,14 @@ vec3 vfReflection(
     out uint source)
 {
     GpuEnvironmentV1 environment = sceneEnvironment.record;
+    // Switched off for the frame, mirroring reflect::EvaluateReflection.
+    // Exactly nothing rather than a small residue: a term that is almost off
+    // still moves every pixel it touches.
+    if ((environment.flagsAndCount.x & kVfEnvironmentReflectionDisabled)
+        != 0u) {
+        source = kVfReflectionSkipped;
+        return vec3(0.0);
+    }
     vec3 normal = normalize(shadingNormal);
     vec3 viewDirection = normalize(view);
     vec3 f0 = vfComputeF0(baseColor, metalness);
