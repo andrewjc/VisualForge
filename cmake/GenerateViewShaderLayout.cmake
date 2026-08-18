@@ -16,8 +16,8 @@ endif()
 if(NOT VF_REFLECTION MATCHES "binding:[ \t]+6")
     message(FATAL_ERROR "phase10 view record drifted from set 0 binding 6")
 endif()
-if(NOT VF_REFLECTION MATCHES "size:[ \t]+240")
-    message(FATAL_ERROR "phase10 view record drifted from 240 bytes")
+if(NOT VF_REFLECTION MATCHES "size:[ \t]+304")
+    message(FATAL_ERROR "phase10 view record drifted from 304 bytes")
 endif()
 
 file(WRITE "${OUTPUT}" [=[#pragma once
@@ -31,7 +31,7 @@ namespace vf::renderer::view {
 inline constexpr std::uint64_t kPhase10ViewLayoutHash =
     0xC34D'6F6A'B1E8'B527ull;
 inline constexpr std::uint32_t kViewDescriptorBinding = 6;
-inline constexpr std::uint32_t kGpuViewConstantSize = 240;
+inline constexpr std::uint32_t kGpuViewConstantSize = 304;
 inline constexpr std::uint32_t kGpuViewProjectionEnabled = 1;
 
 struct alignas(16) GpuViewConstantsV1
@@ -39,6 +39,7 @@ struct alignas(16) GpuViewConstantsV1
     float viewProjectionRows[16]{};
     float previousViewProjectionRows[16]{};
     float unjitteredViewProjectionRows[16]{};
+    float inverseViewProjectionRows[16]{};
     float clipAndJitter[4]{};
     float viewport[4]{};
     std::uint32_t identifiers[4]{};
@@ -50,9 +51,11 @@ static_assert(offsetof(GpuViewConstantsV1,
     previousViewProjectionRows) == 64);
 static_assert(offsetof(GpuViewConstantsV1,
     unjitteredViewProjectionRows) == 128);
-static_assert(offsetof(GpuViewConstantsV1, clipAndJitter) == 192);
-static_assert(offsetof(GpuViewConstantsV1, viewport) == 208);
-static_assert(offsetof(GpuViewConstantsV1, identifiers) == 224);
+static_assert(offsetof(GpuViewConstantsV1,
+    inverseViewProjectionRows) == 192);
+static_assert(offsetof(GpuViewConstantsV1, clipAndJitter) == 256);
+static_assert(offsetof(GpuViewConstantsV1, viewport) == 272);
+static_assert(offsetof(GpuViewConstantsV1, identifiers) == 288);
 
 }
 ]=])

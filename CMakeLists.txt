@@ -444,8 +444,16 @@ add_custom_target(vf_phase15_shaders DEPENDS ${VF_PHASE15_SHADER_OUTPUTS})
 
 set(VF_PHASE16_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders/phase16")
 set(VF_PHASE16_SHADER_OUTPUTS)
-foreach(VF_SHADER IN ITEMS family_scene.frag)
+foreach(VF_SHADER IN ITEMS family_scene.frag sky.vert sky.frag)
     string(REPLACE "." "_" VF_SHADER_SYMBOL_SUFFIX "${VF_SHADER}")
+    # The sky lives with phase 17, whose lighting it reuses, but it is built
+    # here because it needs the same include set the family shader does.
+    if(VF_SHADER MATCHES "^sky\.")
+        set(VF_SHADER_SOURCE_PATH
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/phase17/${VF_SHADER}")
+    else()
+        set(VF_SHADER_SOURCE_PATH "${VF_PHASE16_SHADER_DIR}/${VF_SHADER}")
+    endif()
     set(VF_SHADER_SPV "${VF_GENERATED_DIR}/${VF_SHADER}.spv")
     set(VF_SHADER_INC "${VF_GENERATED_DIR}/${VF_SHADER}.spv.inc")
     add_custom_command(
@@ -457,10 +465,10 @@ foreach(VF_SHADER IN ITEMS family_scene.frag)
             -I"${VF_PHASE16_SHADER_DIR}"
             -I"${VF_PHASE15_SHADER_DIR}"
             -I"${VF_PHASE11_SHADER_DIR}"
-            "${VF_PHASE16_SHADER_DIR}/${VF_SHADER}"
+            "${VF_SHADER_SOURCE_PATH}"
             -o "${VF_SHADER_SPV}"
         DEPENDS
-            "${VF_PHASE16_SHADER_DIR}/${VF_SHADER}"
+            "${VF_SHADER_SOURCE_PATH}"
             ${VF_SHADER_INCLUDES}
             "${VF_PHASE16_SHADER_DIR}/family_shading.glsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/phase17/lighting.glsl"

@@ -34,6 +34,8 @@
 #include "alpha_scene.frag.spv.inc"
 #include "family_scene.frag.spv.inc"
 #include "family_scene_rq.frag.spv.inc"
+#include "sky.frag.spv.inc"
+#include "sky.vert.spv.inc"
 #include "terrain.frag.spv.inc"
 #include "terrain.vert.spv.inc"
 #include "tone_map.frag.spv.inc"
@@ -538,6 +540,10 @@ struct VulkanRasterRenderer::Impl
     // no family record -- so classifying an object as a cutout silently took
     // its material away.
     VkPipeline familyAlphaScenePipeline{VK_NULL_HANDLE};
+    // The sky: a full-screen triangle drawn before the geometry, writing only
+    // the HDR attachment. No vertex buffer and no depth interaction, so it
+    // needs a pipeline of its own rather than a permutation of the scene one.
+    VkPipeline skyPipeline{VK_NULL_HANDLE};
     // One per blended mode, indexed by blend::BlendMode minus one. Blend
     // factors are pipeline state in core Vulkan, so a single pipeline cannot
     // serve additive and multiply.
@@ -995,7 +1001,7 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
             terrainPipeline = VK_NULL_HANDLE;
         }
         for (auto* pipeline : {&alphaScenePipeline, &alphaDepthPipeline,
-            &familyScenePipeline, &familyAlphaScenePipeline}) {
+            &familyScenePipeline, &familyAlphaScenePipeline, &skyPipeline}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device, *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -1523,7 +1529,13 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
     materialBindings[6].binding = view::kViewDescriptorBinding;
     materialBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     materialBindings[6].descriptorCount = 1;
-    materialBindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // Both stages. Vertex alone was right while only the vertex stage read
+    // the view, and it is why the sky read the whole block as zeros: a
+    // fragment shader binding a descriptor its layout does not expose to
+    // that stage reads undefined data, and reads it silently -- validation
+    // does not call it an error.
+    materialBindings[6].stageFlags =
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     materialBindings[7] = materialBindings[4];
     materialBindings[7].binding = scene::kSceneObjectDescriptorBinding;
     materialBindings[7].stageFlags =
@@ -1773,6 +1785,8 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
     VkShaderModule alphaSceneFragment{};
     VkShaderModule alphaDepthFragment{};
     VkShaderModule familySceneFragment{};
+    VkShaderModule skyVertex{};
+    VkShaderModule skyFragment{};
     VkShaderModule toneVertex{};
     VkShaderModule toneFragment{};
     const auto cleanupModules = [this, &meshVertex, &meshFragment,
@@ -1780,6 +1794,7 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
                                  &sceneFragment, &terrainVertex,
                                  &terrainFragment, &alphaSceneFragment,
                                  &alphaDepthFragment, &familySceneFragment,
+                                 &skyVertex, &skyFragment,
                                  &toneVertex, &toneFragment]() {
         for (const auto module : {
                  meshVertex, meshFragment, materialFragment,
@@ -1787,6 +1802,7 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
                  terrainVertex, terrainFragment,
                  alphaSceneFragment, alphaDepthFragment,
                  familySceneFragment,
+                 skyVertex, skyFragment,
                  toneVertex, toneFragment}) {
             if (module != VK_NULL_HANDLE) {
                 vkDestroyShaderModule(device, module, nullptr);
@@ -1818,6 +1834,8 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
             rayQuerySupported ? kPhase18_family_scene_rq_fragSize
                               : kPhase16_family_scene_fragSize,
             familySceneFragment) ||
+        !createModule(kPhase16_sky_vert, kPhase16_sky_vertSize, skyVertex) ||
+        !createModule(kPhase16_sky_frag, kPhase16_sky_fragSize, skyFragment) ||
         !createModule(kPhase6_tone_map_vert,
             kPhase6_tone_map_vertSize, toneVertex) ||
         !createModule(kPhase6_tone_map_frag,
@@ -2228,6 +2246,68 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
         return abi::Result::RasterCreateFailed;
     }
     pipelineInfo.pDepthStencilState = &alphaDepthStencil;
+
+    // The sky. No vertex input -- the triangle comes from the vertex index --
+    // no depth interaction, and only the HDR attachment written: the G-buffer
+    // planes must keep their cleared values where nothing was drawn, or every
+    // ray-traced pass would treat the sky as an opaque surface at the far
+    // plane and stop there.
+    std::array<VkPipelineColorBlendAttachmentState,
+        1 + scene::kSceneGBufferPlaneCount> skyBlendAttachments{};
+    skyBlendAttachments.fill(blendAttachment);
+    for (std::size_t plane = 1; plane < skyBlendAttachments.size(); ++plane) {
+        skyBlendAttachments[plane].colorWriteMask = 0;
+    }
+    VkPipelineColorBlendStateCreateInfo skyBlend = blend;
+    skyBlend.attachmentCount =
+        static_cast<std::uint32_t>(skyBlendAttachments.size());
+    skyBlend.pAttachments = skyBlendAttachments.data();
+    VkPipelineDepthStencilStateCreateInfo skyDepth{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    skyDepth.depthTestEnable = VK_FALSE;
+    skyDepth.depthWriteEnable = VK_FALSE;
+    skyDepth.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    VkPipelineVertexInputStateCreateInfo skyVertexInput{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineRasterizationStateCreateInfo skyRaster = rasterization;
+    skyRaster.cullMode = VK_CULL_MODE_NONE;
+    const std::array skyStages{
+        VkPipelineShaderStageCreateInfo{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,
+            skyVertex, "main", nullptr},
+        VkPipelineShaderStageCreateInfo{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
+            skyFragment, "main", nullptr},
+    };
+    const std::array skyDynamicStates{
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo skyDynamic{
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    skyDynamic.dynamicStateCount =
+        static_cast<std::uint32_t>(skyDynamicStates.size());
+    skyDynamic.pDynamicStates = skyDynamicStates.data();
+    auto skyInfo = pipelineInfo;
+    skyInfo.stageCount = static_cast<std::uint32_t>(skyStages.size());
+    skyInfo.pStages = skyStages.data();
+    skyInfo.pVertexInputState = &skyVertexInput;
+    skyInfo.pRasterizationState = &skyRaster;
+    skyInfo.pDepthStencilState = &skyDepth;
+    skyInfo.pColorBlendState = &skyBlend;
+    skyInfo.pDynamicState = &skyDynamic;
+    skyInfo.pNext = &sceneRendering;
+    // Stated rather than inherited. The sky reads the view constants and the
+    // environment out of the scene set, and a pipeline built against a
+    // different layout reads whatever that layout has at those bindings.
+    skyInfo.layout = scenePipelineLayout;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+            &skyInfo, nullptr, &skyPipeline) != VK_SUCCESS) {
+        cleanupModules();
+        return abi::Result::RasterCreateFailed;
+    }
 
     // One pipeline per blend mode. Blend factors are pipeline state rather
     // than dynamic state in core Vulkan, so a single pipeline cannot serve
@@ -5468,6 +5548,23 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     };
     vkCmdSetViewport(command, 0, 1, &viewport);
     vkCmdSetScissor(command, 0, 1, &scissor);
+    // The sky first, so every later fragment simply overwrites it where
+    // geometry covers the pixel. Drawn only for a frame that captured an
+    // environment: without one `vfMissRadiance` returns zero, which is what
+    // the attachment was already cleared to.
+    if (phase11SceneActive && phase17LightingActive &&
+        layout.materialOffset <= std::numeric_limits<std::uint32_t>::max()) {
+        const auto skyDynamicOffset =
+            static_cast<std::uint32_t>(layout.materialOffset);
+        beginRegion("phase17.sky", {0.4f, 0.6f, 0.95f, 1.0f});
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            skyPipeline);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            scenePipelineLayout, raster::kMaterialDescriptorSet, 1,
+            &materialSet, 1, &skyDynamicOffset);
+        vkCmdDraw(command, 3, 1, 0, 0);
+        endRegion();
+    }
     const raster::MaterialRegistry registry{packet.materials};
     // Phase 11 expands one shared draw list into per-object work. Opaque
     // objects are submitted in packet order; depth alone resolves them.

@@ -5786,3 +5786,63 @@ The switch was added deliberately and for a good reason -- comparing the
 assembled frame cannot separate a per-hit attribute from a divergent bounce
 -- but it was silent, and a silent switch between two sources is a trap for
 the next person to write a probe. It is not silent now.
+
+## The sky renders, and the bug was never in the sky
+
+Landed. Every lit fixture now draws it on both sides and they agree to
+`0.00195` with **zero** differing pixels.
+
+The cause of two reverted attempts, found on the third: the view constants
+were exposed to the vertex stage only.
+
+```
+materialBindings[6].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+```
+
+Nothing had ever read the view in a fragment shader -- `vfTransformPosition`
+runs in the vertex stage -- so vertex-only was right until the sky, which has
+no geometry and must recover its ray from a pixel. A fragment shader binding a
+descriptor its layout does not expose to that stage reads undefined data, and
+reads it **silently**: the validation layers report nothing, and the frame
+that comes back is plausible.
+
+That is why it was so hard to see. With the block reading zeros the ray fell
+back to a constant `(0, 0, 1)`, which still produces a sky -- ambient plus a
+sun lobe of `pow(0.9185, 64) = 0.0043` -- so the picture looked like a sky and
+was wrong by a term small enough to be mistaken for noise.
+
+### What the third attempt did differently
+
+Verified every edit landed, and read the shader instead of reasoning about it.
+Asking the device to output its own values, one member at a time, gave the
+answer in one step: `viewProjectionRows[0].x` came back **zero** from the
+fragment stage while the geometry projected correctly from the same buffer in
+the vertex stage. A binding readable from one stage and not another is a short
+list of causes.
+
+The two earlier attempts failed on instruments, not on analysis. `hdr-source`
+-- added between attempts -- showed the comparison silently switches to the
+bounce-free pair for any lit fixture, so probes written against the full frame
+measured a different render than the one being compared. And at least one
+probe edit never applied, which is why four results appeared to contradict
+each other.
+
+| mutation | differing pixels | verdict |
+| --- | --- | --- |
+| none | 0 | pass |
+| view constants back to vertex-only | 8654 | **fail** |
+| sky not drawn | 36417 | **fail** |
+| ray direction negated | 9098 | **fail** |
+
+The first row of that table is a regression guard for the defect itself.
+
+### One sky, not two
+
+The sky is `vfMissRadiance` evaluated along the view ray -- the same function
+a reflection ray uses when it hits nothing. A second sky would let the sky the
+camera sees disagree with the sky reflected in a window, which is a difference
+nobody goes looking for. With no captured environment it returns zero, which
+is what the attachment was already cleared to, so a frame with no weather is
+untouched by the pass existing.
+
+415 tests, 414 passing in both configurations.

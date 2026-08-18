@@ -3,6 +3,10 @@ struct GpuViewConstantsV1
     vec4 viewProjectionRows[4];
     vec4 previousViewProjectionRows[4];
     vec4 unjitteredViewProjectionRows[4];
+    // Clip space back to the space the frame is shaded in. A pass with no
+    // geometry -- the sky -- has only a pixel to work from, and the ray it
+    // stands for cannot be recovered from a forward transform.
+    vec4 inverseViewProjectionRows[4];
     vec4 clipAndJitter;
     vec4 viewport;
     uvec4 identifiers;

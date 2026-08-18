@@ -451,6 +451,9 @@ struct ReferenceInputs
     // material in the frame marches one, which is the state every fixture
     // before this one was in.
     const texture::CapturedTexture* heightMap{};
+    // The view the frame was projected with. Needed only to turn a pixel back
+    // into the ray it stands for, which is what the sky is shaded from.
+    const view::ViewRecordV1* view{};
     // Occluders in the same camera-relative space as the lights and the
     // shaded positions, which is the space the top-level structure is built
     // in. Absent means an unshadowed reference: exactly what a device without

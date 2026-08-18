@@ -694,6 +694,8 @@ ViewError BuildGpuViewConstants(
             std::begin(constants.previousViewProjectionRows));
         std::copy(std::begin(identity.elements), std::end(identity.elements),
             std::begin(constants.unjitteredViewProjectionRows));
+        std::copy(std::begin(identity.elements), std::end(identity.elements),
+            std::begin(constants.inverseViewProjectionRows));
         return ViewError::None;
     }
     const auto validation = ValidateView(*view);
@@ -701,6 +703,11 @@ ViewError BuildGpuViewConstants(
     std::copy(std::begin(view->viewProjection.elements),
         std::end(view->viewProjection.elements),
         std::begin(constants.viewProjectionRows));
+    // Carried so a pass with no geometry can recover the ray a pixel stands
+    // for. The record already holds it; it simply never reached the device.
+    std::copy(std::begin(view->inverseViewProjection.elements),
+        std::end(view->inverseViewProjection.elements),
+        std::begin(constants.inverseViewProjectionRows));
     std::copy(std::begin(view->previousViewProjection.elements),
         std::end(view->previousViewProjection.elements),
         std::begin(constants.previousViewProjectionRows));

@@ -6173,6 +6173,7 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
     // Read only by a material that declares the height role, so a fixture
     // without one is unaffected by its presence.
     inputs.heightMap = &heightTexture;
+    inputs.view = &frame.views.front();
 
     inputs.families = &familyPacket;
     if (options.lit) {

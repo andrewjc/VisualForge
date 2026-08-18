@@ -1341,6 +1341,50 @@ ScenePacketError RenderReferenceGBuffer(
             hdr->pixels.assign(pixelCount,
                 std::array<float, 4>{0.01f, 0.021f, 0.04f, 1.0f});
         }
+            // The sky, filled before any geometry so a covered pixel simply
+            // overwrites it -- the order the device draws in, and the reason
+            // neither side needs depth interaction for it.
+            //
+            // Shaded through `EvaluateMissRadiance`, the same function a
+            // reflection ray uses when it hits nothing, so the sky the camera
+            // sees cannot disagree with the sky reflected in a window.
+            if (inputs.environment != nullptr && inputs.view != nullptr &&
+                image.width > 0 && image.height > 0) {
+                const auto& inverse = inputs.view->inverseViewProjection;
+                for (std::uint32_t y = 0; y < image.height; ++y) {
+                    for (std::uint32_t x = 0; x < image.width; ++x) {
+                        // Row major, which `MatrixIndex` states and which the
+                        // centre-ray test pins against the camera rather than
+                        // against the device.
+                        const std::array<float, 4> clip{
+                            2.0f * ((static_cast<float>(x) + 0.5f) /
+                                static_cast<float>(image.width)) - 1.0f,
+                            2.0f * ((static_cast<float>(y) + 0.5f) /
+                                static_cast<float>(image.height)) - 1.0f,
+                            1.0f, 1.0f};
+                        std::array<float, 4> farPoint{};
+                        for (std::size_t row = 0; row < 4; ++row) {
+                            for (std::size_t column = 0; column < 4;
+                                 ++column) {
+                                farPoint[row] += static_cast<float>(
+                                    inverse.elements[row * 4 + column]) *
+                                    clip[column];
+                            }
+                        }
+                        std::array<float, 3> direction{0.0f, 0.0f, 1.0f};
+                        if (std::abs(farPoint[3]) > 1.0e-12f) {
+                            direction = {farPoint[0] / farPoint[3],
+                                farPoint[1] / farPoint[3],
+                                farPoint[2] / farPoint[3]};
+                        }
+                        const auto radiance = reflect::EvaluateMissRadiance(
+                            *inputs.environment, direction, {}, false);
+                        hdr->pixels[static_cast<std::size_t>(y) *
+                            image.width + x] = {radiance[0], radiance[1],
+                            radiance[2], 1.0f};
+                    }
+                }
+            }
         for (auto& pixel : image.pixels) {
             pixel.albedo[0] = 0.01f;
             pixel.albedo[1] = 0.021f;
