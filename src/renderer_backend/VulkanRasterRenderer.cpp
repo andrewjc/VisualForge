@@ -561,6 +561,14 @@ struct VulkanRasterRenderer::Impl
     std::uint64_t reportedAccelerationUs{};
     std::uint64_t reportedGpuWaitUs{};
     std::uint64_t reportedCopyUs{};
+    // Everything inside a frame that is neither recording nor waiting: the
+    // packet decodes and the staging upload. The host measured 48 ms across a
+    // call the backend accounted 6 ms for, so the difference was real and
+    // unattributed.
+    std::uint64_t frameDecodeUs{};
+    std::uint64_t frameUploadUs{};
+    std::uint64_t reportedDecodeUs{};
+    std::uint64_t reportedUploadUs{};
     material::MaterialReplayBundle materialBundle;
     material::MaterialGpuRecords materialRecords;
     view::ViewRecordV1 viewRecord;
@@ -5844,6 +5852,11 @@ abi::Result VulkanRasterRenderer::Render(
     const abi::RasterFrameRequestV1& request,
     abi::RasterStatusV1& status) noexcept
 {
+    // Everything up to the upload layout: every packet decode, every texture
+    // preparation. Timed because the host measured 48 ms across this call
+    // while the backend accounted for 6 ms of it, and an unattributed 42 ms
+    // is not something to reason about from the outside.
+    const auto prepareStarted = std::chrono::steady_clock::now();
     if (!impl_->ready) {
         InitializeStatus(status, abi::Result::RasterNotCreated,
             "raster session not created");
@@ -6587,9 +6600,17 @@ abi::Result VulkanRasterRenderer::Render(
     if (result == abi::Result::Success) {
         result = impl_->BindUnclaimedSampledSlots();
     }
+    impl_->frameDecodeUs += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - prepareStarted).count());
     const auto uploadLayout = impl_->BuildUploadLayout(packet);
+
     if (result == abi::Result::Success) {
+        const auto uploadStarted = std::chrono::steady_clock::now();
         result = impl_->UploadPacket(packet, uploadLayout);
+        impl_->frameUploadUs += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - uploadStarted).count());
     }
     if (result == abi::Result::Success) {
         result = impl_->PrepareDeformation(impl_->submissions + 1);
@@ -6651,6 +6672,10 @@ abi::Result VulkanRasterRenderer::Render(
             message += std::to_string(window(impl_->frameGpuWaitUs, impl_->reportedGpuWaitUs));
             message += " readback-us=";
             message += std::to_string(window(impl_->frameCopyUs, impl_->reportedCopyUs));
+            message += " prepare-us=";
+            message += std::to_string(window(impl_->frameDecodeUs, impl_->reportedDecodeUs));
+            message += " upload-us=";
+            message += std::to_string(window(impl_->frameUploadUs, impl_->reportedUploadUs));
             impl_->callbacks.log(
                 impl_->callbacks.userData, 1u, message.c_str());
         }
