@@ -157,9 +157,9 @@ Stated gaps, not silent ones:
   pass and written to the HDR target. A separate deferred pass that re-reads
   the G-buffer is the natural refactor and is the right time to do it is
   Phase 18, when ray-traced shadows need the G-buffer anyway.
-- **Sky and weather resources are not rendered.** The environment record
-  carries sun, moon, ambient, and fog, and weather transitions blend between
-  two environments, but no sky dome or cloud layer is drawn.
+- ~~Sky and weather resources are not rendered.~~ The sky is drawn; see "The
+  sky" below. No cloud layer: the environment record carries no cloud
+  resource, so drawing one would mean inventing it.
 - **No live capture of engine lights.** The light list is a fixture. The
   capture boundary is identified (`ShadowSceneNode`) but not hooked.
 
@@ -191,3 +191,47 @@ inside the declared unshadowed parity envelope.
   cheaper to carry than a list whose length depends on the weather.
 
   Mutation-verified: selecting the sun's intensity for the moon fails the case.
+
+## The sky
+
+Drawn as a full-screen pass before the geometry, writing only the HDR
+attachment so the G-buffer planes keep their cleared values where nothing was
+drawn -- otherwise every ray-traced pass would treat the sky as an opaque
+surface at the far plane and stop there.
+
+It is not a new sky. `vfMissRadiance` already computes what a ray that leaves
+the world sees, and the sky is that function evaluated along the view ray. A
+second one would let the sky the camera sees disagree with the sky reflected
+in a window. With no captured environment it returns zero, which is the
+attachment's clear value, so a frame that captured no weather is unaffected by
+the pass existing.
+
+Recovering the ray needed the inverse view-projection on the device, which the
+record always held and never sent. The view constants carry it now, at offset
+192 of a block that grew from 240 bytes to 304.
+
+Device and reference agree to `0.00195` with **zero** differing pixels.
+
+| mutation | differing pixels |
+| --- | --- |
+| none | 0 |
+| view constants exposed to the vertex stage only | 8654 |
+| sky not drawn | 36417 |
+| ray direction negated | 9098 |
+
+### The defect it exposed
+
+The view constants were declared `VK_SHADER_STAGE_VERTEX_BIT`. Nothing had
+ever read the view from a fragment shader, so that was correct until a pass
+with no geometry needed to turn a pixel back into a ray. A fragment shader
+binding a descriptor its layout does not expose to that stage reads undefined
+data and reads it **silently** -- the validation layers say nothing.
+
+The result looked like a sky. With the block reading zeros the ray fell back
+to a constant `(0, 0, 1)`, giving ambient plus a sun lobe of
+`pow(0.9185, 64) = 0.0043`: a plausible picture, wrong by an amount easily
+mistaken for noise. Two attempts were reverted before the third asked the
+device to print its own uniform one member at a time, which located it
+immediately -- `viewProjectionRows[0].x` reads zero from the fragment stage
+while the geometry projects correctly from the same buffer in the vertex
+stage.
