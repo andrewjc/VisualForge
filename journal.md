@@ -3976,3 +3976,77 @@ not yet separated, and it is not claimed as fixed.
 
 Still missing: the landscape, which the mirror has never sent (phase 14 live
 promotion), so the ground below the horizon is still open sky.
+
+## Inside out, fourth cause: the winding was right and the convention was not
+
+A loading-screen book settled this one. The cover read backwards through its
+own spine: not a mirrored image -- the book sat upright and only the face
+nearest the camera was missing, with the far one showing through it. That is
+the exact signature of an inverted cull, and it is the fourth distinct cause
+this session to produce the same visible symptom.
+
+Before changing anything, every input that combines into the final cull
+direction was reported together, because each had been reasoned about
+separately and each was individually defensible -- which is how a pair of them
+cancels and a third leaves the whole scene inverted. Measured on the Sanctuary
+frame:
+
+| input | measured | consequence |
+| --- | --- | --- |
+| `view::ViewOrientationSign` | `+1.000`, flips on 0 frames | the third cause never fires live |
+| engine `FrontCounterClockwise` | 1043 of 1043 meshes | the engine's answer is uniform |
+| `modelDeterminant < 0` | 0 objects | `EffectiveFrontFace` is a no-op here |
+| `FaceMode::TwoSided` | 416 of 1043 | 40% survive either way |
+
+The third cause, then, was inert: the captured view does not reverse
+orientation, and the flip added for it has never once fired in a live frame. It
+is kept because a view that did reverse would still need it, but it was not
+what fixed anything, and the pixel measurement that appeared to confirm it was
+measuring tint, not winding.
+
+The real defect is a convention mismatch. D3D11 decides facing in *screen*
+space, after the viewport transform, where Y points down. The packet's
+`frontFace` is mathematical NDC, where Y points up -- that is what the backend
+documents and what every offline fixture is authored against. A Y flip reverses
+a triangle's signed area, so the two differ by exactly one inversion, and the
+probe was copying the engine's flag across without it. The backend then applied
+its own Y-down inversion and landed on the opposite of the engine's rule.
+
+Reading the rasterizer state from the engine was necessary and not sufficient:
+the value was right, the convention was not, and the stream carried the
+engine's own answer while still drawing every single-sided model inside out.
+The 416 two-sided meshes in the same frame kept both faces regardless, which is
+why this looked intermittent rather than total.
+
+`visibility::PacketFrontFaceFromEngine` names the conversion and is applied
+where the engine's declaration becomes packet data. Deliberately not a bare `!`
+at the call site: three inversions exist in this path and two of them cancel,
+so a negation is indisputable only until somebody counts them.
+
+Mutating it back to the identity mapping fails both the new test and the
+existing winding test. 389 tests pass in debug and in release. Live, all 642
+draws now declare clockwise in NDC, which the backend maps to
+`VK_FRONT_FACE_COUNTER_CLOCKWISE` -- the engine's own rule.
+
+### The ground is not a decoding problem
+
+The engine's 42 vertex declarations were dumped from its own
+`CreateInputLayout` calls rather than inferred. None carries landscape blend
+weights. The two layouts holding `TEXCOORD4`-`TEXCOORD7` put them on input slot
+1 as four half4s, which is instance data -- a per-instance matrix -- not the
+eight land channels a terrain vertex needs.
+
+So the mesh decoder is not silently dropping the landscape: the stream that
+draws it has not been found in the capture at all. `BuildLayoutFromInputElements`
+does skip `TEXCOORD` past index 1, which was the first suspicion, but nothing
+in the engine's declarations would be recovered by mapping them. A per-format
+histogram of which declarations the world geometry actually draws with, and how
+much geometry each carries, is now reported every 120 frames to narrow this.
+
+The dump has to be incremental. A one-shot version ran on the load screen and
+reported 11 of the 42 an exterior cell ends up declaring, and none of the 11
+was a candidate -- a measurement taken at the wrong moment, which reads exactly
+like a measurement that answers the question.
+
+Unresolved and not claimed: the texture capture failed to complete on two of
+five live runs, including runs predating this change.
