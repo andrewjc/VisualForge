@@ -421,3 +421,51 @@ placed beyond the fog near distance.
 Texture fetch at a hit and more than one sample per pixel are no longer
 blocked: `vfHitTexCoord` exists alongside `vfHitVertexColor`, and the
 instrument that verifies one verifies the other.
+
+## Phase 19 per-hit work is complete
+
+All three items this phase deferred are landed and mutation-tested:
+
+- **Interpolated vertex colour at a hit** -- both sides weight the corners by
+  the barycentrics the intersection produces.
+- **Texture fetch at a hit** -- both sides resolve the library entry the hit
+  geometry's material names and sample it at the interpolated coordinate, at
+  level zero because a ray query has no derivatives.
+- **More than one sample per pixel** -- four directions from the mirrored
+  sequence on both sides, with the reported hit kept from the first.
+
+Landing them uncovered four defects that a solid white texture and flat
+vertex colours had concealed:
+
+1. The reference rasterizer interpolated attributes in **screen space** while
+   the device is perspective-correct. Invisible while no varying attribute sat
+   on rotated geometry; 223 interior mismatches the moment one did. Fixed by
+   carrying the reciprocal of clip w through projection.
+2. The reference applied its single base-colour texture to **every** surface,
+   including those whose material names none.
+3. The family replay never sent a **texture library**, so every material on
+   the device resolved to "no texture". The raster pass hid this behind its
+   fallback to the bound base texture; a ray hit has no fallback and read
+   white.
+4. The shader constants mirroring `ReflectionPolicy` were checked by nothing,
+   and a sample-count mismatch is invisible to any radiance comparison.
+
+### Mutation coverage
+
+| mutation | caught by |
+| --- | --- |
+| hit albedo x1.15 | signed mean, 15.4% |
+| barycentric weights permuted | magnitude-weighted mean, 8.35% |
+| vertex colour read one float over | both, 23.9% / 15.5% |
+| no texture fetch at the hit | both, 92.4% / 34.5% |
+| texture axes swapped | magnitude-weighted mean, 5.47% |
+| device reuses one sample direction | both, 12.3% / 8.9% |
+| shader sample count drifts from the policy | the constant-mirror test |
+| shader roughness cutoff drifts from the policy | the constant-mirror test |
+
+### What remains unmeasured
+
+Hit position is observed only coarsely, for the fixture reason recorded above:
+the reflected hits sit below the fog near distance, so `vfFog` returns exactly
+zero either side of a small displacement. A reflected hit placed beyond it
+would settle that.
