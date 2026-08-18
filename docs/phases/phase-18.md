@@ -231,3 +231,31 @@ and both are recorded in `journal.md` as pitfalls.
   because this fixture carries none. `RequiresAnyHit` and
   `ConfirmAlphaCandidate` decide the cutout path and are tested on the CPU;
   wiring an any-hit shader to them is outstanding.
+
+## The rebuild-every-frame gap, measured
+
+The backend still rebuilds the bottom level every frame and does not consult
+`DecideBuild` or `ShouldCompact`. That was listed above as a gap on the
+assumption that rebuilding costs something worth avoiding. Measured live on a
+Sanctuary exterior, over 120-frame windows:
+
+```text
+frame timing record-us=14783 acceleration-us=109 gpu-wait-us=14242
+             readback-us=311 prepare-us=270 upload-us=72
+```
+
+The whole acceleration build is **0.1 ms** against a 14 ms frame, and the frame
+is dominated by `gpu-wait`. Refit machinery would buy nothing measurable today,
+and the update path costs an `ALLOW_UPDATE` flag plus update scratch on every
+structure that might take it -- which the static case deliberately does not
+reserve.
+
+`DecideBuild` and `ShouldCompact` are therefore kept as the CPU contract for a
+capability the backend will need when Phase 13's deformation is promoted live
+and geometry starts changing between frames, not as dead code awaiting a
+caller. They are stated here rather than left to be rediscovered, because a
+tested function with no caller otherwise reads as an oversight.
+
+What the measurement does say is where the time actually goes: `prepare-us`
+(every packet decode and texture preparation) is 0.27 ms and `upload-us` is
+0.07 ms, so neither decoding nor staging the scene is the cost. The GPU is.
