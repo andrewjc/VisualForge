@@ -273,6 +273,15 @@ VisibilityError ResolveShadingFrame(
     return VisibilityError::None;
 }
 
+
+raster::FrontFace PacketFrontFaceFromEngine(
+    const bool engineFrontCounterClockwise) noexcept
+{
+    return engineFrontCounterClockwise
+        ? raster::FrontFace::Clockwise
+        : raster::FrontFace::CounterClockwise;
+}
+
 raster::FrontFace EffectiveFrontFace(
     const raster::FrontFace declared,
     const float modelDeterminant) noexcept

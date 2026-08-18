@@ -181,6 +181,20 @@ struct ShadingFrame
     float modelDeterminant,
     const ShadingFrameInput& input,
     ShadingFrame& frame) noexcept;
+// The winding declaration D3D11 bound, restated in the packet's convention.
+//
+// `FrontCounterClockwise` is a statement about *screen* space: D3D computes a
+// triangle's signed area after the viewport transform, where Y points down.
+// The packet declares winding in mathematical NDC, where Y points up. A Y flip
+// reverses signed area, so the engine's flag inverts on the way in -- and the
+// backend inverts it again on the way out for Vulkan's Y-down framebuffer,
+// which is what makes the round trip land on the engine's own rule.
+//
+// This is deliberately not folded into the `!` at the call site. Two of the
+// three inversions in this path cancel, and a bare negation is indisputable
+// only until somebody counts them.
+[[nodiscard]] raster::FrontFace PacketFrontFaceFromEngine(
+    bool engineFrontCounterClockwise) noexcept;
 [[nodiscard]] raster::FrontFace EffectiveFrontFace(
     raster::FrontFace declared,
     float modelDeterminant) noexcept;

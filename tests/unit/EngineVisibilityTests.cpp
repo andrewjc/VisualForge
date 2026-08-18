@@ -364,6 +364,31 @@ TEST_CASE("P15_two_sided_shading_frames_stay_in_the_geometric_hemisphere",
     CHECK(frame.liftedToHorizon);
 }
 
+
+TEST_CASE("P20_engine_winding_declaration_converts_into_the_packet_convention",
+    "[phase20][visibility]")
+{
+    using visibility::PacketFrontFaceFromEngine;
+    // D3D11 decides which side of a triangle faces the camera in *screen*
+    // space -- after the viewport transform, where Y points down. The packet
+    // declares winding in mathematical NDC, where Y points up, because that is
+    // what the backend documents and what the offline fixtures are built
+    // against. Flipping Y reverses a triangle's signed area, so the two
+    // conventions differ by exactly one inversion.
+    //
+    // Measured live before this existed: the engine declared
+    // FrontCounterClockwise for all 1,043 meshes in the frame, the flag was
+    // copied into the packet unconverted, and the backend's own Y-down
+    // inversion then turned it into VK_FRONT_FACE_CLOCKWISE -- the opposite of
+    // the engine's rule. Every single-sided model culled the face nearest the
+    // camera and drew the one behind it: a loading-screen book showed its
+    // cover through its own spine, with the title reading backwards. The 416
+    // two-sided meshes in the same frame survived either way, which is why
+    // this looked intermittent rather than total.
+    CHECK(PacketFrontFaceFromEngine(true) == raster::FrontFace::Clockwise);
+    CHECK(PacketFrontFaceFromEngine(false) ==
+        raster::FrontFace::CounterClockwise);
+}
 TEST_CASE("P15_negative_determinant_transforms_flip_winding_and_handedness",
     "[phase15][visibility]")
 {

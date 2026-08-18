@@ -899,8 +899,14 @@ TEST_CASE("P20_assembly_takes_its_winding_from_the_engine_not_a_constant",
     // Both directions, so neither can be produced by a constant. A single
     // case would pass against a hardcoded value half the time, which is
     // exactly how the original defect survived.
-    CHECK(assembleWith(true) == raster::FrontFace::CounterClockwise);
-    CHECK(assembleWith(false) == raster::FrontFace::Clockwise);
+    //
+    // Inverted relative to the engine's flag on purpose: D3D declares facing
+    // in Y-down screen space and this field is Y-up NDC. Taking the flag from
+    // the engine fixed only half of it -- the value was right and the
+    // convention was not, so models still drew inside out while the stream
+    // carried the engine's own answer.
+    CHECK(assembleWith(true) == raster::FrontFace::Clockwise);
+    CHECK(assembleWith(false) == raster::FrontFace::CounterClockwise);
 }
 
 TEST_CASE("P20_depth_only_draws_are_not_world_geometry",

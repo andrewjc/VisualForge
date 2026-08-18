@@ -597,7 +597,8 @@ DrawStreamError AssembleSceneGeometry(
             // The concatenated base for this mesh, so its own indices stay
             // zero-based and every mesh keeps the numbering it was read with.
             draw.vertexOffset = static_cast<std::int32_t>(slot.vertexOffset);
-            // The winding the engine itself declared for this draw.
+            // The winding the engine itself declared for this draw, restated
+            // in the packet's convention.
             //
             // This was `CounterClockwise` for every mesh, which is the
             // opposite of D3D11's default and rendered every model inside
@@ -606,9 +607,14 @@ DrawStreamError AssembleSceneGeometry(
             // state the engine bound. A draw whose thread never saw a state
             // takes D3D11's documented default, clockwise-front, rather than
             // the reverse.
-            draw.frontFace = mesh.frontCounterClockwise
-                ? raster::FrontFace::CounterClockwise
-                : raster::FrontFace::Clockwise;
+            //
+            // Reading the state from the engine was necessary but not
+            // sufficient: the flag is a statement about D3D's Y-down screen
+            // space and the packet's field is Y-up NDC, so it still rendered
+            // inside out while carrying the engine's own answer. The
+            // conversion between the two conventions is what closes it.
+            draw.frontFace = visibility::PacketFrontFaceFromEngine(
+                mesh.frontCounterClockwise);
             draw.depthCompare = raster::DepthCompare::Less;
             rasterPacket.draws.push_back(draw);
 
