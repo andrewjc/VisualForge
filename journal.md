@@ -5760,3 +5760,29 @@ transposed "fix" got believed in the first place. The next step is to make
 the sky probe report which submission it read before comparing anything, and
 that is a change to the harness rather than to the sky. 415 tests, 414
 passing in both configurations, and the sky is out of the tree.
+
+### The instrument that would have saved the afternoon
+
+`hdr-source` is now reported beside the HDR numbers, naming which pair of
+renders produced them: `full-frame-pair` or `bounce-free-pair`.
+
+Measured immediately, and it is the whole explanation for the sky's
+contradictory results:
+
+| fixture | pair compared |
+| --- | --- |
+| `--render-family-scene` | full-frame-pair |
+| `--render-family-scene --lit` | bounce-free-pair |
+| `--render-family-scene --shadows` | bounce-free-pair |
+
+Every sky probe was written against `parityHdr` and `expectedHdr` -- the full
+frame -- while the comparison, for any lit fixture, was reading `termWithHdr`
+against `shadowedUnindirectHdr`. Those are different submissions. Four
+measurements that could not all be true were four measurements of two
+different things, and nothing about the sky needed to be inconsistent for
+that to happen.
+
+The switch was added deliberately and for a good reason -- comparing the
+assembled frame cannot separate a per-hit attribute from a divergent bounce
+-- but it was silent, and a silent switch between two sources is a trap for
+the next person to write a probe. It is not silent now.

@@ -7750,6 +7750,15 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
               << " bloom-changed=" << bloomChangedPixels
               << " tone-differing=" << toneDifferingPixels
               << " tone-max-code=" << maximumToneCode
+              // Which pair the numbers above came from. The comparison
+              // silently switches to the bounce-free renders when they
+              // exist, and a probe written against one pair while the
+              // comparison reads the other produces results that cannot all
+              // be true -- which is exactly how a sky investigation spent an
+              // afternoon reconciling four mutually inconsistent
+              // measurements.
+              << " hdr-source="
+              << (deterministic ? "bounce-free-pair" : "full-frame-pair")
               << " hdr-max-error=" << maximumHdrError
               << " hdr-differing=" << differingHdrPixels
               << " hdr-differing-divergent-bounce="
