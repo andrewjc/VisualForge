@@ -5091,3 +5091,57 @@ over *that* would see it while still averaging the sampling noise away.
 That is one more device render per contract and a differencing pass. It is the
 next piece of work, it is specified rather than guessed, and every input it
 needs already exists.
+
+## The specular term, measured as itself
+
+The reflection comparison could not see a 15% error in the hit shading. It
+does now, and the reason it could not is worth keeping.
+
+Whole-frame statistics were insensitive because the quantity is small twice
+over. The ray-traced terms are around 2% of the frame; within the reflection
+term, the part contributed by a *geometry hit* is around 2% of that again,
+because the rays overwhelmingly miss into the environment. Differencing two
+device renders that differ only by `EnvironmentReflectionDisabled` isolates
+the term, and comparing it against the oracle's own pair
+(`unindirectHdr` against `unreflectedHdr`) removes the frame from the
+comparison. That alone was not enough: with 16x16 tile means the whole term
+peaks at 0.114 while the hit contribution peaks at 0.0022, so a 1.15x hit
+albedo moved a tile mean by 3e-4 against a 1e-3 floor and still passed.
+
+The dilution was the tile. Geometry hits here are sparse and strong -- 200
+pixels of 786432 -- and a 256-pixel mean spreads each one out until it is
+gone. Both sides already report what their ray found in the reactive plane's
+spare lanes, so the mean is now taken over the hit pixels alone, which is a
+set they agree on rather than a guess.
+
+Measured, all with a full build so the SPIR-V is actually re-embedded:
+
+| hit-albedo mutation | geom-term-error | whole-term max error | verdict |
+| --- | --- | --- | --- |
+| none | 0.31% | 2.2e-4 | pass |
+| 1.15x | 15.3% | 5.0e-4 | **fail** |
+| 10x | 900% | 2.0e-2 | **fail** |
+
+The device and oracle means agree to 0.0048008 against 0.00480002. The gate
+is 5%, sitting 48x above the baseline noise and 3x below the mutation it
+must catch. The 10x row is the positive control that the mutation reaches
+the binary at all -- it is listed because the 1.15x row alone cannot
+distinguish "insensitive check" from "shader never rebuilt", and this project
+has been fooled by the second before.
+
+The whole-term tile comparison is kept and gated. It is insensitive to the
+hit path for the reason above, so it is never relied on for it; what it does
+bound is the environment the rays miss into, which is the bulk of the term.
+
+### What this does not measure
+
+Hit *position* is only coarsely observed, and the fixture is why. Displacing
+it by 1000 units is caught (417%) and a 1.5x distance error is caught
+(36.8%), but a 1.05x distance error produces bit-identical output. The
+threshold explains it: fog begins at 2.0 and the reflected hits sit below
+that, so `vfFog` returns exactly zero on both sides of a small displacement,
+and the point lamp contributes negligibly at those hits. Position therefore
+reaches the output only through a thresholded term. Gross attribute errors
+are caught; a few-per-cent error in `t` is not. That is a fixture coverage
+limit, stated rather than papered over, and what would settle it is a
+reflected hit placed beyond the fog near distance.

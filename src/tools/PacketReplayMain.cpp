@@ -1488,6 +1488,164 @@ std::vector<accel::ShadowTriangle> BuildOccluders(
 // reads at a hit. The ray query recovers which geometry it struck but has no
 // vertex attributes bound, so both sides read the per-object family record or
 // they cannot agree about what the reflection shows.
+// Compares one isolated ray-traced term between the device and the reference,
+// as tile means.
+//
+// A whole-frame comparison cannot verify a per-hit attribute. The ray-traced
+// terms are about 2% of the frame, so a 15% error inside one is 0.3%
+// frame-wide and passes any bound loose enough to admit eight-ray sampling
+// noise -- measured: a tile comparison over the frame saw the noise through
+// perfectly and let a 1.15x hit albedo pass completely unchanged.
+//
+// Both sides form the term by the same subtraction, a frame carrying it
+// against one without, so what is compared is the term rather than the frame
+// it sits in. Tile means keep the sampling noise averaged out; isolating the
+// term keeps a shading error at its own magnitude.
+struct TermComparison
+{
+    std::uint64_t tiles{};
+    std::uint64_t mismatches{};
+    std::uint64_t carryingTiles{};
+    float maximumError{};
+    float maximumTerm{};
+};
+
+[[nodiscard]] TermComparison CompareTermTiles(
+    const std::span<const std::array<float, 4>> deviceWith,
+    const std::span<const std::array<float, 4>> deviceWithout,
+    const scene::HdrImage& referenceWith,
+    const scene::HdrImage& referenceWithout,
+    const std::uint32_t width,
+    const std::uint32_t height)
+{
+    TermComparison result{};
+    constexpr std::uint32_t kTile = 16;
+    const auto pixels = static_cast<std::size_t>(width) * height;
+    if (deviceWith.size() < pixels || deviceWithout.size() < pixels ||
+        referenceWith.pixels.size() < pixels ||
+        referenceWithout.pixels.size() < pixels) {
+        return result;
+    }
+    for (std::uint32_t tileY = 0; tileY + kTile <= height; tileY += kTile) {
+        for (std::uint32_t tileX = 0; tileX + kTile <= width; tileX += kTile) {
+            std::array<double, 3> wantSum{};
+            std::array<double, 3> gotSum{};
+            std::uint32_t counted = 0;
+            for (std::uint32_t y = tileY; y < tileY + kTile; ++y) {
+                for (std::uint32_t x = tileX; x < tileX + kTile; ++x) {
+                    const auto index =
+                        static_cast<std::size_t>(y) * width + x;
+                    for (std::size_t channel = 0; channel < 3; ++channel) {
+                        wantSum[channel] +=
+                            referenceWith.pixels[index][channel] -
+                            referenceWithout.pixels[index][channel];
+                        gotSum[channel] += deviceWith[index][channel] -
+                            deviceWithout[index][channel];
+                    }
+                    ++counted;
+                }
+            }
+            if (counted == 0) continue;
+            ++result.tiles;
+            auto tileCarries = false;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                const auto want = wantSum[channel] / counted;
+                if (std::abs(want) > 1.0e-3) tileCarries = true;
+                const auto got = gotSum[channel] / counted;
+                const auto error = std::abs(want - got);
+                result.maximumError = std::max(result.maximumError,
+                    static_cast<float>(error));
+                result.maximumTerm = std::max(result.maximumTerm,
+                    static_cast<float>(std::abs(want)));
+                // Relative to the term, which is the point: five per cent of
+                // a term the frame barely carries is still five per cent.
+                if (error > 1.0e-3 + 5.0e-2 * std::abs(want)) {
+                    ++result.mismatches;
+                    break;
+                }
+            }
+            if (tileCarries) ++result.carryingTiles;
+        }
+    }
+    return result;
+}
+
+// The reflection term over the whole frame is dominated by the environment
+// the rays miss into: its tile peak is 0.114 while the part a geometry hit
+// contributes is 0.0022. Scaling the hit albedo by 1.15 therefore moves a tile
+// mean by 3e-4, which no honest bound on the whole term can separate from
+// nothing. That is dilution, not insensitivity -- the hits are sparse and
+// strong, and a 16x16 mean spreads each one over 256 pixels.
+//
+// So the mean is taken over the hit pixels alone. Both sides report what
+// their ray found in the reactive plane's spare lanes, so "the pixels that
+// reflected geometry" is a set both agree on rather than a guess, and a
+// per-cent error in the hit shading is a per-cent error in this number.
+struct GeometryTermComparison
+{
+    std::uint64_t pixels{};
+    std::array<double, 3> deviceMean{};
+    std::array<double, 3> referenceMean{};
+    float relativeError{};
+};
+
+[[nodiscard]] GeometryTermComparison CompareGeometryHitTerm(
+    const std::span<const std::array<float, 4>> deviceWith,
+    const std::span<const std::array<float, 4>> deviceWithout,
+    const scene::HdrImage& referenceWith,
+    const scene::HdrImage& referenceWithout,
+    const std::span<const scene::GBufferPixelV1> deviceGbuffer,
+    const std::span<const scene::GBufferPixelV1> referenceGbuffer,
+    const std::size_t pixels)
+{
+    GeometryTermComparison result{};
+    if (deviceWith.size() < pixels || deviceWithout.size() < pixels ||
+        referenceWith.pixels.size() < pixels ||
+        referenceWithout.pixels.size() < pixels ||
+        deviceGbuffer.size() < pixels || referenceGbuffer.size() < pixels) {
+        return result;
+    }
+    // Matches `kVfReflectionGeometry` in shaders/phase19/reflection.glsl.
+    constexpr float kGeometrySource = 1.0f;
+    std::array<double, 3> deviceSum{};
+    std::array<double, 3> referenceSum{};
+    for (std::size_t index = 0; index < pixels; ++index) {
+        const auto& device = deviceGbuffer[index];
+        const auto& reference = referenceGbuffer[index];
+        if (device.reserved[0] != kGeometrySource) continue;
+        // The same hit on both sides. A pixel where they found different
+        // geometry is a different hit, not different shading of one.
+        if (device.reserved[0] != reference.reserved[0] ||
+            device.reserved[1] != reference.reserved[1]) {
+            continue;
+        }
+        ++result.pixels;
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            deviceSum[channel] += deviceWith[index][channel] -
+                deviceWithout[index][channel];
+            referenceSum[channel] +=
+                referenceWith.pixels[index][channel] -
+                referenceWithout.pixels[index][channel];
+        }
+    }
+    if (result.pixels == 0) return result;
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        result.deviceMean[channel] =
+            deviceSum[channel] / static_cast<double>(result.pixels);
+        result.referenceMean[channel] =
+            referenceSum[channel] / static_cast<double>(result.pixels);
+        const auto want = result.referenceMean[channel];
+        const auto got = result.deviceMean[channel];
+        // Relative to the term being measured. The floor is well under the
+        // measured hit term rather than over it, so it cannot swallow the
+        // signal the way a frame-sized epsilon did.
+        const auto scale = std::max(std::abs(want), 1.0e-4);
+        result.relativeError = std::max(result.relativeError,
+            static_cast<float>(std::abs(want - got) / scale));
+    }
+    return result;
+}
+
 std::vector<reflect::ReflectionTriangle> BuildReflectionGeometry(
     const raster::DecodedPacket& projected,
     const std::span<const std::array<float, 3>> vertexPositions,
@@ -5849,6 +6007,14 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     // The same frame without the transparent table, rendered by the same
     // device, so the two differ in exactly the blended layer.
     std::vector<std::array<float, 4>> baselineHdr;
+    // The device's reflection term, rendered with it and without it so the
+    // difference is the term alone rather than 2% of a frame.
+    std::vector<std::array<float, 4>> termWithHdr;
+    std::vector<std::array<float, 4>> termWithoutHdr;
+    // The hit classification from the render the term is measured on, rather
+    // than borrowed from a render made with different environment flags.
+    std::vector<scene::GBufferPixelV1> termWithGbuffer;
+    auto deviceTermRendered = false;
     auto baselineRendered = false;
     // The same frame with the transparent table listed backwards.
     std::vector<std::array<float, 4>> reorderedHdr;
@@ -5943,6 +6109,63 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         if (!submitted) {
             std::cerr << "family-replay: submission failed diagnostic="
                       << rendered.status.diagnostic << '\n';
+        }
+        // Two more renders that differ from each other only by the specular
+        // bounce, so their difference is that term and nothing else. The
+        // diffuse bounce is switched off in both, matching how the reference
+        // forms its own pair: `unindirectHdr` against `unreflectedHdr`.
+        if (options.lit && submitted) {
+            auto termPacket = lightPacket;
+            termPacket.environment.flags |=
+                lighting::EnvironmentIndirectDisabled;
+            std::vector<std::byte> withBytes;
+            std::vector<std::byte> withoutBytes;
+            const auto withOk =
+                lighting::EncodeLightPacket(termPacket, withBytes) ==
+                lighting::LightPacketError::None;
+            termPacket.environment.flags |=
+                lighting::EnvironmentReflectionDisabled;
+            const auto withoutOk =
+                lighting::EncodeLightPacket(termPacket, withoutBytes) ==
+                lighting::LightPacketError::None;
+            if (withOk && withoutOk) {
+                const auto renderTerm = [&](
+                    const std::vector<std::byte>& lights,
+                    std::vector<std::array<float, 4>>& hdrOut,
+                    std::vector<scene::GBufferPixelV1>* gbufferOut) {
+                    hdrOut.assign(renderedHdr.size(),
+                        std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f});
+                    std::vector<scene::GBufferPixelV1> localGbuffer(
+                        rendered.gbuffer.size());
+                    auto& termGbuffer =
+                        gbufferOut != nullptr ? *gbufferOut : localGbuffer;
+                    termGbuffer.assign(rendered.gbuffer.size(),
+                        scene::GBufferPixelV1{});
+                    std::vector<raster::Rgba8> termImage(
+                        rendered.image.pixels.size());
+                    auto termRequest = request;
+                    termRequest.lightData =
+                        reinterpret_cast<std::uintptr_t>(lights.data());
+                    termRequest.lightSize = lights.size();
+                    termRequest.gbufferData =
+                        reinterpret_cast<std::uintptr_t>(termGbuffer.data());
+                    termRequest.outputData =
+                        reinterpret_cast<std::uintptr_t>(termImage.data());
+                    termRequest.hdrData =
+                        reinterpret_cast<std::uintptr_t>(hdrOut.data());
+                    abi::RasterStatusV1 termStatus{};
+                    termStatus.structSize = sizeof(termStatus);
+                    return static_cast<bool>(
+                        host.RenderRasterFrame(termRequest, termStatus));
+                };
+                deviceTermRendered =
+                    renderTerm(withBytes, termWithHdr, &termWithGbuffer) &&
+                    renderTerm(withoutBytes, termWithoutHdr, nullptr);
+                if (!deviceTermRendered) {
+                    std::cerr << "family-replay: term submission failed"
+                              << (char)10;
+                }
+            }
         }
         // The same frame again with the transparent table removed. Everything
         // else -- geometry, lights, materials, ray-traced terms -- is bit for
@@ -6383,6 +6606,19 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     // Pixels the reflection term actually changed, measured against a
     // reference carrying neither ray-traced term. Zero of them would mean
     // the comparison proves only that two unreflected images agree.
+    // The specular term itself, device against reference, as tile means.
+    const auto reflectionTerm = (options.lit && deviceTermRendered)
+        ? CompareTermTiles(termWithHdr, termWithoutHdr, unindirectHdr,
+              unreflectedHdr, options.width, options.height)
+        : TermComparison{};
+    // The same term restricted to the pixels that actually reflected
+    // geometry, where a per-cent error in the hit shading is a per-cent
+    // error in the number.
+    const auto geometryTerm = (options.lit && deviceTermRendered)
+        ? CompareGeometryHitTerm(termWithHdr, termWithoutHdr, unindirectHdr,
+              unreflectedHdr, termWithGbuffer, expected.pixels,
+              static_cast<std::size_t>(options.width) * options.height)
+        : GeometryTermComparison{};
     std::uint64_t reflectedPixels = 0;
     float maximumReflectionDelta = 0.0f;
     if (options.lit && unreflectedHdr.width == unshadowedHdr.width &&
@@ -6886,6 +7122,24 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     }
 
     const auto passed = submitted && wrote &&
+        // The specular bounce, measured as itself. Whole-frame statistics
+        // cannot see it: it is around two per cent of the picture, and the
+        // part a geometry hit contributes is two per cent of that again, so
+        // a fifteen per cent error in the hit shading moves a frame mean by
+        // three parts in ten thousand. Differencing the two renders leaves
+        // the term, restricting to the pixels that reflected geometry leaves
+        // the hit contribution, and on that number the same error is fifteen
+        // per cent. Measured: the two sides agree to 0.3% here, and scaling
+        // the hit albedo by 1.15 takes it to 15%.
+        (!options.reflections || !options.lit ||
+            (deviceTermRendered && geometryTerm.pixels > 0 &&
+                geometryTerm.relativeError <= 5.0e-2f)) &&
+        // The whole reflection term as tile means. Insensitive to the hit
+        // shading for the reason above, so it is kept for what it does
+        // bound -- the environment the rays miss into, which is the bulk of
+        // the term -- and never relied on for the hit path.
+        (!options.reflections || !options.lit ||
+            reflectionTerm.mismatches == 0) &&
         comparison.identityMismatches == 0 &&
         interior.mismatchedPixels == 0 &&
         // The exclusion is bounded, or it becomes a way of not comparing the
@@ -7004,6 +7258,15 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " lit-pixels=" << litPixels
               << " shadowed-pixels=" << shadowedPixels
               << " shadow-max-delta=" << maximumShadowDelta
+              << " term-tiles=" << reflectionTerm.tiles
+              << " term-mismatches=" << reflectionTerm.mismatches
+              << " term-carrying=" << reflectionTerm.carryingTiles
+              << " term-max=" << reflectionTerm.maximumTerm
+              << " term-max-error=" << reflectionTerm.maximumError
+              << " geom-term-pixels=" << geometryTerm.pixels
+              << " geom-term-device=" << geometryTerm.deviceMean[0]
+              << " geom-term-reference=" << geometryTerm.referenceMean[0]
+              << " geom-term-error=" << geometryTerm.relativeError
               << " reflected-pixels=" << reflectedPixels
               << " reflection-max-delta=" << maximumReflectionDelta
               << " reflection-probe-rays=" << reflectionProbeRays
