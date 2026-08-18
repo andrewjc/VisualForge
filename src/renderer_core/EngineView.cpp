@@ -1063,4 +1063,50 @@ const char* ToString(const FramePacketError error) noexcept
     return "unknown";
 }
 
+
+float ViewOrientationSign(const Matrix4& viewProjection) noexcept
+{
+    // Orientation is decided by the linear part. The determinant of the
+    // upper-left 3x3 is negative exactly when the transform reverses
+    // handedness, and therefore reverses the winding of every triangle.
+    const auto& m = viewProjection.elements;
+    const auto determinant =
+        static_cast<double>(m[0]) *
+            (static_cast<double>(m[5]) * m[10] -
+             static_cast<double>(m[6]) * m[9]) -
+        static_cast<double>(m[1]) *
+            (static_cast<double>(m[4]) * m[10] -
+             static_cast<double>(m[6]) * m[8]) +
+        static_cast<double>(m[2]) *
+            (static_cast<double>(m[4]) * m[9] -
+             static_cast<double>(m[5]) * m[8]);
+    // Zero is degenerate rather than flipped. Reporting +1 keeps a collapsed
+    // matrix from silently inverting every model in the frame.
+    if (!std::isfinite(determinant) || determinant == 0.0) return 1.0f;
+    return determinant < 0.0 ? -1.0f : 1.0f;
+}
+
+float ViewOrientationSign(
+    const Matrix4& view,
+    const Matrix4& projection) noexcept
+{
+    // Row-major with row vectors, so a point is transformed as v * view * proj
+    // and the combined linear part is the product in that order.
+    float combined[16]{};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column) {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                sum += view.elements[row * 4 + k] *
+                    projection.elements[k * 4 + column];
+            }
+            combined[row * 4 + column] = sum;
+        }
+    }
+    // Delegated so both overloads decide orientation by exactly one rule.
+    Matrix4 product{};
+    std::copy(std::begin(combined), std::end(combined),
+        std::begin(product.elements));
+    return ViewOrientationSign(product);
+}
 }

@@ -416,4 +416,21 @@ static_assert(offsetof(ViewRecordV1, previousViewProjection) == 432);
 static_assert(sizeof(PassRecordV1) == 40);
 static_assert(sizeof(FramePacketHeaderV1) == 96);
 
+
+// The sign of the orientation that a view and projection together impose.
+//
+// Negative means the pair reverses triangle winding. A front face captured
+// from the engine is expressed in the engine's own clip space, so a mirror
+// that re-projects those triangles through a view which negates an axis must
+// invert the declared winding, or it culls the side it meant to keep -- which
+// shows as a model rendered inside out, its interior visible where its outer
+// shell should be.
+//
+// Derived from the matrices rather than assumed, so a fixture authored
+// directly in packet space and a live capture both get the right answer from
+// the same rule.
+[[nodiscard]] float ViewOrientationSign(const Matrix4& viewProjection) noexcept;
+[[nodiscard]] float ViewOrientationSign(
+    const Matrix4& view,
+    const Matrix4& projection) noexcept;
 }

@@ -803,6 +803,12 @@ bool BuildLiveSceneGeometry(
     // The rasterizer state each mesh was drawn under, keyed by the same
     // identity the scene objects carry. Built from the same records the scene
     // packet was translated from, so a mesh and its winding cannot disagree.
+    // Whether the captured view reverses triangle orientation. Derived from
+    // the matrix rather than assumed, so it stays correct if the engine.s
+    // convention ever differs from the one observed here.
+    const auto orientationFlips =
+        view::ViewOrientationSign(record.viewProjection) < 0.0f;
+
     // A sorted vector, not a hash map. There are about six thousand recorded
     // draws a frame and a map allocates a node for each one, every frame, for
     // a table that is thrown away at the end of the call.
@@ -866,7 +872,15 @@ bool BuildLiveSceneGeometry(
         // case the defaults above stand and the runtime.s own defaults apply.
         if (const auto found = winding.find(object.objectId);
             found != winding.end()) {
-            mesh.frontCounterClockwise = found->second.first;
+            // The engine declared this winding against its own clip space.
+            // The mirror re-projects the triangles through the captured view,
+            // and when that view reverses orientation the declared front face
+            // has to reverse with it -- otherwise every single-sided model is
+            // culled on the wrong side and shows its interior. Two-sided
+            // models hid this, because both of their faces survive either way.
+            mesh.frontCounterClockwise = orientationFlips
+                ? !found->second.first
+                : found->second.first;
             mesh.cullMode = found->second.second;
         }
         meshes.push_back(mesh);

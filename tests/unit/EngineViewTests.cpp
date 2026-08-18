@@ -295,3 +295,46 @@ TEST_CASE("P10_frame_packet_is_pointer_free_deterministic_and_thread_owned", "[p
     CHECK(DecodeFramePacket(first, decoded) ==
         FramePacketError::ChecksumMismatch);
 }
+
+TEST_CASE("P10_view_orientation_sign_detects_a_winding_reversal",
+    "[view][phase10]")
+{
+    using namespace vf::renderer::view;
+    const auto identity = [] {
+        Matrix4 m{};
+        m.elements[0] = 1.0f;
+        m.elements[5] = 1.0f;
+        m.elements[10] = 1.0f;
+        m.elements[15] = 1.0f;
+        return m;
+    };
+
+    // Nothing is flipped, so a triangle keeps the winding it was authored
+    // with. This is the case a packet fixture is in.
+    CHECK(ViewOrientationSign(identity(), identity()) == 1.0f);
+
+    // A projection that negates Y reverses every triangle. This is the case a
+    // live capture is in, and getting it wrong culls the outer shell of every
+    // single-sided model and shows its interior instead.
+    auto flipY = identity();
+    flipY.elements[5] = -1.0f;
+    CHECK(ViewOrientationSign(identity(), flipY) == -1.0f);
+    CHECK(ViewOrientationSign(flipY, identity()) == -1.0f);
+
+    // Two reversals compose back to none: a mirrored view through a mirrored
+    // projection is not flipped, and inverting twice would be as wrong as not
+    // inverting once.
+    CHECK(ViewOrientationSign(flipY, flipY) == 1.0f);
+
+    // A scale is not a flip, however uneven.
+    auto scaled = identity();
+    scaled.elements[0] = 4.0f;
+    scaled.elements[5] = 0.25f;
+    scaled.elements[10] = 9.0f;
+    CHECK(ViewOrientationSign(scaled, identity()) == 1.0f);
+
+    // A collapsed matrix is degenerate, not reversed. Reporting a flip here
+    // would invert every model in the frame on a matrix that renders nothing.
+    Matrix4 zero{};
+    CHECK(ViewOrientationSign(zero, identity()) == 1.0f);
+}
