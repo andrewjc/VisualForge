@@ -623,3 +623,43 @@ TEST_CASE("P19_a_reflection_reports_which_geometry_it_found",
     CHECK_FALSE(missed.hit);
     CHECK(missed.objectIndex == 0u);
 }
+
+TEST_CASE("P19_a_reflection_hit_interpolates_the_vertex_colour",
+    "[phase19][reflection]")
+{
+    // A ray query reports the primitive and its barycentrics, and the shader
+    // now reads the three corners the ray actually struck rather than one
+    // colour for the whole object. The oracle has to do the same or the two
+    // disagree everywhere a surface is not a single flat colour -- which is
+    // most of them.
+    reflect::ReflectionTriangle triangle{};
+    triangle.a = {0.0f, 0.0f, 1.0f};
+    triangle.b = {1.0f, 0.0f, 1.0f};
+    triangle.c = {0.0f, 1.0f, 1.0f};
+    triangle.normal = {0.0f, 0.0f, -1.0f};
+    triangle.albedo = {1.0f, 1.0f, 1.0f};
+    triangle.twoSided = true;
+    triangle.vertexColor = {{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}}};
+    const std::array<reflect::ReflectionTriangle, 1> triangles{triangle};
+
+    // Straight at the first corner: its own colour, undiluted.
+    reflect::ReflectionRay atA{};
+    atA.origin = {0.01f, 0.01f, 0.0f};
+    atA.direction = {0.0f, 0.0f, 1.0f};
+    atA.maximumDistance = 10.0f;
+    const auto hitA = reflect::TraceReflection(triangles, atA);
+    REQUIRE(hitA.hit);
+    CHECK(hitA.albedo[0] > 0.9f);
+    CHECK(hitA.albedo[2] < 0.1f);
+
+    // And at the third corner, the other end of the same interpolation.
+    reflect::ReflectionRay atC{};
+    atC.origin = {0.01f, 0.97f, 0.0f};
+    atC.direction = {0.0f, 0.0f, 1.0f};
+    atC.maximumDistance = 10.0f;
+    const auto hitC = reflect::TraceReflection(triangles, atC);
+    REQUIRE(hitC.hit);
+    CHECK(hitC.albedo[2] > 0.9f);
+    CHECK(hitC.albedo[0] < 0.1f);
+}

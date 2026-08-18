@@ -1490,7 +1490,7 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
 
     // Sixteen always, plus the top level and the geometry-to-object table
     // when ray query is enabled.
-    std::array<VkDescriptorSetLayoutBinding, 20> materialBindings{};
+    std::array<VkDescriptorSetLayoutBinding, 22> materialBindings{};
     materialBindings[0].binding = raster::kMaterialDescriptorBinding;
     materialBindings[0].descriptorType =
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -1551,11 +1551,18 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
             VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         materialBindings[16].descriptorCount = 1;
         materialBindings[16].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        // The geometry-to-object table a reflection hit is shaded through.
+        // The per-geometry table a reflection hit is shaded through, and the
+        // frame's own index and vertex streams. A ray query reports a
+        // geometry and a barycentric pair; these are what turn that into the
+        // three vertices it actually struck.
         materialBindings[17] = materialBindings[7];
         materialBindings[17].binding =
             scene::kSceneGeometryObjectDescriptorBinding;
-        materialBindingCount = 18;
+        materialBindings[18] = materialBindings[7];
+        materialBindings[18].binding = scene::kSceneIndexDescriptorBinding;
+        materialBindings[19] = materialBindings[7];
+        materialBindings[19].binding = scene::kSceneVertexDescriptorBinding;
+        materialBindingCount = 20;
     }
     // The colour target as it stood before any refractive draw. A refractive
     // surface that samples the live target instead sees whatever refractive
@@ -1587,7 +1594,8 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
     // capacity and the descriptors past it are never sampled. Without this
     // every one of the 256 slots would have to be written with something
     // valid before any draw could run.
-    std::array<VkDescriptorBindingFlags, 20> materialBindingFlags{};
+    std::array<VkDescriptorBindingFlags, materialBindings.size()>
+        materialBindingFlags{};
     materialBindingFlags[materialTextureBindingIndex] =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     VkDescriptorSetLayoutBindingFlagsCreateInfo materialFlagsInfo{
@@ -1670,9 +1678,10 @@ abi::Result VulkanRasterRenderer::Impl::CreateCoreObjects() noexcept
         // descriptors are allocated whether or not a frame fills them.
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             5 + scene::kSceneMaterialTextureCapacity},
-        // Ten scene buffers when ray query adds the geometry-to-object table.
+        // Twelve scene buffers when ray query adds the per-geometry table and
+        // the index and vertex streams a hit is shaded from.
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            10 + deform::kDeformBindingCount + gi::kIndirectBindingCount},
+            12 + deform::kDeformBindingCount + gi::kIndirectBindingCount},
         // Last so the count can drop it on a device without ray query, where
         // the type is not a valid pool entry.
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
@@ -3312,7 +3321,8 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
 
     // A ray query recovers which geometry it hit but has no vertex attributes
     // bound, so without this table a reflection hit cannot be shaded at all.
-    const auto objectTableBytes = plans.size() * sizeof(std::uint32_t);
+    const auto objectTableBytes =
+        plans.size() * sizeof(scene::GpuGeometryRecordV1);
     if (accelGeometryObjects.capacity < objectTableBytes) {
         DestroyBuffer(accelGeometryObjects);
         const auto created = CreateHostBuffer(objectTableBytes,
@@ -3332,12 +3342,79 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
         tableWrite.pBufferInfo = &tableInfo;
         vkUpdateDescriptorSets(device, 1, &tableWrite, 0, nullptr);
     }
+
+    // The frame's index and vertex streams, whole. The per-geometry record
+    // carries absolute element offsets into them, so these are bound at zero
+    // and never need re-pointing when the layout moves.
+    //
+    // Rewritten every frame rather than once: the upload buffer is recreated
+    // whenever a frame needs more room than the last one, and a descriptor
+    // still naming the old buffer reads freed memory.
+    {
+        const std::array<VkDescriptorBufferInfo, 2> streamInfos{
+            VkDescriptorBufferInfo{upload.buffer, 0, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{upload.buffer, 0, VK_WHOLE_SIZE},
+        };
+        const std::array streamBindings{
+            scene::kSceneIndexDescriptorBinding,
+            scene::kSceneVertexDescriptorBinding,
+        };
+        std::array<VkWriteDescriptorSet, 2> streamWrites{};
+        for (std::size_t entry = 0; entry < streamWrites.size(); ++entry) {
+            streamWrites[entry].sType =
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            streamWrites[entry].dstSet = materialSet;
+            streamWrites[entry].dstBinding = streamBindings[entry];
+            streamWrites[entry].descriptorCount = 1;
+            streamWrites[entry].descriptorType =
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            streamWrites[entry].pBufferInfo = &streamInfos[entry];
+        }
+        vkUpdateDescriptorSets(device,
+            static_cast<std::uint32_t>(streamWrites.size()),
+            streamWrites.data(), 0, nullptr);
+    }
+    const auto indexIs16Bit =
+        packet.header.indexType == raster::IndexType::Uint16;
     for (std::size_t index = 0; index < plans.size(); ++index) {
-        const auto objectIndex = plans[index].objectIndex;
+        const auto& plan = plans[index];
+        scene::GpuGeometryRecordV1 record{};
+        record.objectIndex = plan.objectIndex;
+        // Absolute element offsets into the frame's shared upload buffer, so
+        // the shader carries no per-frame base and cannot apply the wrong one.
+        record.firstIndexElement = static_cast<std::uint32_t>(
+            layout.indexOffset / (indexIs16Bit ? 2u : 4u)) + plan.firstIndex;
+        record.firstVertexFloat =
+            static_cast<std::uint32_t>(layout.vertexOffset / 4u) +
+            static_cast<std::uint32_t>(
+                static_cast<std::int64_t>(plan.vertexOffset) *
+                static_cast<std::int64_t>(
+                    sizeof(raster::RasterVertexV3) / sizeof(float)));
+        record.flags = indexIs16Bit ? scene::kGeometryIndexIs16Bit : 0u;
+        // Which texture shades a hit on this geometry. Resolved here because
+        // the query reports no material, and the object's draw is the only
+        // thing that names one.
+        record.textureIndex = 0;
+        if (plan.objectIndex < scenePacket.objects.size()) {
+            const auto drawIndex =
+                scenePacket.objects[plan.objectIndex].drawIndex;
+            if (drawIndex < packet.draws.size()) {
+                const auto materialId = packet.draws[drawIndex].materialId;
+                for (std::size_t material = 0;
+                     material < packet.materials.size(); ++material) {
+                    if (packet.materials[material].resourceId != materialId) {
+                        continue;
+                    }
+                    record.textureIndex =
+                        ResolveMaterialTextureIndex(packet, material);
+                    break;
+                }
+            }
+        }
         std::memcpy(
             static_cast<std::byte*>(accelGeometryObjects.mapped) +
-                index * sizeof(std::uint32_t),
-            &objectIndex, sizeof(objectIndex));
+                index * sizeof(record),
+            &record, sizeof(record));
     }
 
     const auto indexSize =

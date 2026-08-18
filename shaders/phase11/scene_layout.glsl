@@ -152,13 +152,96 @@ layout(set = 0, binding = 20) uniform sampler2D
 // the device enabled the extension.
 layout(set = 0, binding = 17) uniform accelerationStructureEXT sceneTlas;
 
-// One entry per bottom-level geometry, holding the index of the object whose
-// records describe it. A ray query recovers the geometry it hit but has no
-// vertex attributes bound, so a hit could not otherwise be shaded.
+// One entry per bottom-level geometry: everything a ray-query hit needs that
+// the query itself cannot report. A query returns the geometry index and the
+// barycentrics and nothing else, so the object it belongs to, where its
+// triangle list starts, where its vertices start, and which texture shades it
+// are all resolved on the host once per geometry and read back here.
+//
+// The element offsets are already absolute into the frame's shared upload
+// buffer, so the shader needs no per-frame base and cannot get one wrong.
+struct GpuGeometryRecordV1
+{
+    uint objectIndex;
+    uint firstIndexElement;
+    uint firstVertexFloat;
+    uint textureIndex;
+    uint flags;
+    uint reserved0;
+    uint reserved1;
+    uint reserved2;
+};
+
+// Set when the frame's indices are 16-bit, which the shader has to unpack two
+// to a word. Both widths occur -- the fixtures encode 16-bit and the live
+// mirror emits 32-bit -- and reading one as the other walks a triangle list
+// that does not exist.
+const uint kVfGeometryIndexIs16Bit = 1u;
+
 layout(set = 0, binding = 18, std430) readonly buffer SceneGeometryObjects
 {
-    uint records[];
+    GpuGeometryRecordV1 records[];
 } sceneGeometryObjects;
+
+// The frame's index stream, as words. A 16-bit frame packs two indices per
+// word and unpacks them with the flag above.
+layout(set = 0, binding = 21, std430) readonly buffer SceneIndices
+{
+    uint words[];
+} sceneIndices;
+
+// The frame's vertex stream, as floats. RasterVertexV3 is twelve of them:
+// position, colour, texcoord, normal, pad.
+layout(set = 0, binding = 22, std430) readonly buffer SceneVertices
+{
+    float values[];
+} sceneVertices;
+
+const uint kVfVertexFloats = 12u;
+const uint kVfVertexColorFloat = 3u;
+const uint kVfVertexTexCoordFloat = 6u;
+
+uint vfGeometryIndex(GpuGeometryRecordV1 record, uint corner)
+{
+    uint element = record.firstIndexElement + corner;
+    if ((record.flags & kVfGeometryIndexIs16Bit) == 0u) {
+        return sceneIndices.words[element];
+    }
+    uint word = sceneIndices.words[element >> 1u];
+    return (element & 1u) != 0u ? (word >> 16u) : (word & 0xFFFFu);
+}
+
+// The barycentric-weighted vertex colour at a hit. `bary` is what the query
+// reports, which is the weight of the second and third corners; the first
+// takes the remainder.
+vec3 vfHitVertexColor(GpuGeometryRecordV1 record, uint triangle, vec2 bary)
+{
+    vec3 weights = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    vec3 total = vec3(0.0);
+    for (uint corner = 0u; corner < 3u; ++corner) {
+        uint vertex = vfGeometryIndex(record, triangle * 3u + corner);
+        uint base = record.firstVertexFloat + vertex * kVfVertexFloats +
+            kVfVertexColorFloat;
+        total += weights[corner] * vec3(sceneVertices.values[base],
+            sceneVertices.values[base + 1u],
+            sceneVertices.values[base + 2u]);
+    }
+    return total;
+}
+
+vec2 vfHitTexCoord(GpuGeometryRecordV1 record, uint triangle, vec2 bary)
+{
+    vec3 weights = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    vec2 total = vec2(0.0);
+    for (uint corner = 0u; corner < 3u; ++corner) {
+        uint vertex = vfGeometryIndex(record, triangle * 3u + corner);
+        uint base = record.firstVertexFloat + vertex * kVfVertexFloats +
+            kVfVertexTexCoordFloat;
+        total += weights[corner] * vec2(sceneVertices.values[base],
+            sceneVertices.values[base + 1u]);
+    }
+    return total;
+}
 #endif
 
 const uint kVfLightTypeAmbient = 0u;

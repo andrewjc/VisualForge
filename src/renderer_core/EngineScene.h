@@ -197,8 +197,35 @@ struct alignas(16) TransparentDrawRecordV1
     std::uint32_t reserved[2]{};
 };
 
+// What a ray-query hit needs that the query itself cannot report.
+//
+// A query returns a geometry index and a barycentric pair and nothing else --
+// no vertex attributes, no material. Everything a hit shades with is
+// therefore resolved on the host, once per geometry, and read back through
+// this table. Mirrored by `GpuGeometryRecordV1` in scene_layout.glsl.
+struct alignas(16) GpuGeometryRecordV1
+{
+    std::uint32_t objectIndex{};
+    // Absolute element offsets into the frame's shared upload buffer, so the
+    // shader needs no per-frame base and cannot apply the wrong one.
+    std::uint32_t firstIndexElement{};
+    std::uint32_t firstVertexFloat{};
+    std::uint32_t textureIndex{};
+    std::uint32_t flags{};
+    std::uint32_t reserved[3]{};
+};
+
+// Set when the frame's indices are 16-bit, which the shader unpacks two to a
+// word. Both widths occur -- the fixtures encode 16-bit and the live mirror
+// emits 32-bit -- and reading one as the other walks a triangle list that
+// does not exist.
+inline constexpr std::uint32_t kGeometryIndexIs16Bit = 1u << 0;
+
+static_assert(sizeof(GpuGeometryRecordV1) == kGpuGeometryRecordSize);
+
 struct ScenePacket
 {
+
     ScenePacketHeaderV1 header{};
     std::vector<OpaqueObjectV1> objects;
     // Empty means one implicit instance per object using the object's own

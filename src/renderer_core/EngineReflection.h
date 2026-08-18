@@ -271,6 +271,12 @@ struct ReflectionTriangle
     // *hit* lets those pixels be excluded from a radiance comparison by name,
     // rather than by widening a bound until they fit.
     std::uint32_t objectIndex{};
+    // Per-corner colour, interpolated at the hit by the same barycentrics the
+    // intersection test already computes. The ray query reports them, so both
+    // sides can now read the point that was actually struck instead of one
+    // value for the whole surface. White leaves `albedo` exactly as it was.
+    std::array<std::array<float, 3>, 3> vertexColor{{
+        {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}}};
     bool twoSided{};
 };
 

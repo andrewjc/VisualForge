@@ -262,8 +262,10 @@ vec3 vfReflection(
     // records describe it -- a ray query has no vertex attributes bound, so
     // this is the only way both sides can read the same surface.
     uint geometry = rayQueryGetIntersectionGeometryIndexEXT(query, true);
-    uint objectIndex = geometry < sceneGeometryObjects.records.length()
-        ? sceneGeometryObjects.records[geometry] : 0u;
+    GpuGeometryRecordV1 hitGeometry =
+        sceneGeometryObjects.records[
+            geometry < sceneGeometryObjects.records.length() ? geometry : 0u];
+    uint objectIndex = hitGeometry.objectIndex;
     float distance = rayQueryGetIntersectionTEXT(query, true);
     vec3 hitPosition = origin + direction * distance;
     vec3 hitNormal = vfOrientHitNormal(
@@ -277,8 +279,16 @@ vec3 vfReflection(
     // for a tinting family or an explicit tint flag. Every ordinary material
     // therefore reflected black, which is indistinguishable from a ray that
     // hit nothing at all.
+    // The surface's colour at the point that was actually struck, not a
+    // constant for the whole object. The query reports the primitive and the
+    // barycentrics, and the per-geometry record says where that primitive's
+    // indices and vertices live, so the three corners can be read and
+    // weighted exactly as the raster pass interpolates them.
+    uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+    vec2 hitBary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
-        sceneFamilies.records[objectIndex].baseColor.rgb);
+        sceneFamilies.records[objectIndex].baseColor.rgb *
+            vfHitVertexColor(hitGeometry, primitive, hitBary));
 
 
     source = kVfReflectionGeometry;

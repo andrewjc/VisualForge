@@ -5145,3 +5145,79 @@ reaches the output only through a thresholded term. Gross attribute errors
 are caught; a few-per-cent error in `t` is not. That is a fixture coverage
 limit, stated rather than papered over, and what would settle it is a
 reflected hit placed beyond the fog near distance.
+
+## Per-hit attributes land: the interpolated vertex colour
+
+The stashed `ray-hit-attribute-fetch` work is applied and passing. It was held
+back because the contract could not tell a correct interpolation from a wrong
+one; with the isolated-term comparison it can, and three separate mutations
+now fail.
+
+### What the frame comparison was actually measuring
+
+Applying the interpolation broke two whole-frame comparisons: the interior
+comparison at 200 mismatches against a bound of 41, and the HDR comparison at
+659 against 491. Both were attributed rather than accommodated:
+
+- **200 of 200** interior mismatches were pixels where the two sides' diffuse
+  bounces hit different geometry. `divergent-hits=0` -- the reflection's
+  single deterministic ray disagreed nowhere.
+- **659 of 659** HDR mismatches, likewise.
+
+So the interpolation was never the disagreement. Excluding those pixels was
+tried and abandoned in the same session: it removes `hdr-excluded=13689`,
+*exactly* the lit-pixel count, and what survives agrees to `2.2e-05` because
+it is background where nothing was traced. Both comparisons reported that same
+`2.2e-05` afterwards, which is the tell -- an exclusion that leaves only the
+pixels nothing happened on is a widened bound wearing a better word.
+
+### The split that works
+
+Each part is now compared with an instrument suited to it, and nothing is
+excluded or loosened:
+
+- **Deterministic frame, per pixel.** The reference gains a shadowed
+  no-bounce render (`shadowedUnindirectHdr`) to pair with the device's
+  bounce-off frame. Every pixel is compared -- 49152 of 49152 -- and the
+  interior agrees to `0.0092` with zero mismatches, lit pixels included.
+- **Diffuse bounce, as a term in tile means.** Eight stochastic rays cannot be
+  compared pixel for pixel; differenced out of both sides and averaged, 78 of
+  192 tiles carry it, it peaks at 0.142, and the two agree to `0.0028`.
+- **Specular term, over the hit pixels.** As established above.
+
+### Two statistics, because they fail to different things
+
+| mutation | signed mean | magnitude-weighted mean | verdict |
+| --- | --- | --- | --- |
+| none | 0.41% | 2.90% | pass |
+| hit albedo x1.15 | 15.4% | 15.0% | **fail** |
+| barycentric weights permuted | 0.80% | 8.35% | **fail** |
+| vertex colour read one float over | 23.9% | 15.5% | **fail** |
+
+The signed mean is nearly blind to a permutation -- reordering the weights
+leaves the average over many hit points where it was, moving it 0.4% -- so the
+magnitude-weighted absolute mean carries that case. Neither alone is enough;
+both are gated at 5%.
+
+### The fixture had to be made to vary
+
+The permutation mutation passed at first, bit-identical. Every reflection ray
+lands on object 3 (`geom-term-objects=16`), the shadow fixture's occluder, and
+its three corners all carried `{0.70, 0.70, 0.72}`. Interpolating a constant is
+the identity, so the weights were unobservable and the check would have passed
+whatever the device computed. Its corners now differ, chosen so their mean is
+the colour it used to carry. The rotated-object concern that keeps objects 1
+and 2 flat -- perspective-correct against the oracle's screen-space
+interpolation -- does not bite here: `interior-mismatches=0` and
+`gbuffer-identity-mismatches=0` are unmoved.
+
+### Scope
+
+The term comparisons are gated off when a transparent layer is present. There
+the reference renders no layer and the device compares against its own
+uncomposited baseline, so the two pairs differ in the composite as well as in
+the term -- measured as `bounce-max-error=1.94` and `device-bounce-moved=0`,
+which is the difference reading as the layer rather than the bounce. The
+bounce and specular terms are gated wherever the pairs do correspond.
+
+396 tests pass in both debug and release.

@@ -109,8 +109,11 @@ vec3 vfIndirect(
         } else {
             uint geometry =
                 rayQueryGetIntersectionGeometryIndexEXT(query, true);
-            uint objectIndex = geometry < sceneGeometryObjects.records.length()
-                ? sceneGeometryObjects.records[geometry] : 0u;
+            GpuGeometryRecordV1 hitGeometry =
+                sceneGeometryObjects.records[
+                    geometry < sceneGeometryObjects.records.length()
+                        ? geometry : 0u];
+            uint objectIndex = hitGeometry.objectIndex;
             hitProbe += float((objectIndex + 1u) * 131u +
                 rayQueryGetIntersectionPrimitiveIndexEXT(query, true) + 1u);
             float distance = rayQueryGetIntersectionTEXT(query, true);
@@ -122,8 +125,13 @@ vec3 vfIndirect(
             // declared. Reading the tint alone made every ordinary material
             // bounce black, so the diffuse indirect term contributed nothing
             // on exactly the surfaces that carry a room's light.
+            uint primitive =
+                rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
+            vec2 hitBary =
+                rayQueryGetIntersectionBarycentricsEXT(query, true);
             vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
-                sceneFamilies.records[objectIndex].baseColor.rgb);
+                sceneFamilies.records[objectIndex].baseColor.rgb *
+                    vfHitVertexColor(hitGeometry, primitive, hitBary));
 
             // Shaded through the same function the raster pass uses, which
             // shadows the bounce surface as well: a room must not brighten

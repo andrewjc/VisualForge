@@ -95,6 +95,15 @@ inline constexpr std::uint32_t kSceneMaterialTextureDescriptorBinding = 20;
 // entries past the frame's library count are bound but never sampled, which
 // is what descriptorBindingPartiallyBound permits.
 inline constexpr std::uint32_t kSceneMaterialTextureCapacity = 256;
+// The frame's index and vertex streams, bound so a ray-query hit can recover
+// the triangle it found. A ray query returns a geometry index and a pair of
+// barycentrics and nothing else -- no vertex attributes -- so a hit could
+// only ever be shaded from per-object constants. With these it can read the
+// three vertices it actually struck.
+inline constexpr std::uint32_t kSceneIndexDescriptorBinding = 21;
+inline constexpr std::uint32_t kSceneVertexDescriptorBinding = 22;
+inline constexpr std::uint32_t kGpuGeometryRecordSize = 32;
+
 inline constexpr std::uint32_t kGpuOpaqueObjectSize = 224;
 inline constexpr std::uint32_t kGpuSceneInstanceSize = 160;
 inline constexpr std::uint32_t kGpuVisibilityRecordSize = 64;

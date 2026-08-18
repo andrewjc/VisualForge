@@ -389,9 +389,22 @@ ReflectionHit TraceReflection(
             ray.origin[2] + direction[2] * distance};
         nearest.normal =
             OrientHitNormal(triangle.normal, direction, triangle.twoSided);
-        nearest.albedo = triangle.albedo;
         nearest.objectIndex = triangle.objectIndex;
         nearest.primitiveIndex = triangle.primitiveIndex;
+        // The barycentrics the intersection already produced, weighting the
+        // corner colours exactly as `vfHitVertexColor` does on the device:
+        // the first corner takes the remainder, and `u` and `v` belong to the
+        // second and third. Mirrored rather than re-derived, because the two
+        // are compared pixel for pixel.
+        const std::array<float, 3> weights{1.0f - u - v, u, v};
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            auto interpolated = 0.0f;
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                interpolated +=
+                    weights[corner] * triangle.vertexColor[corner][channel];
+            }
+            nearest.albedo[channel] = triangle.albedo[channel] * interpolated;
+        }
     }
     return nearest;
 }
