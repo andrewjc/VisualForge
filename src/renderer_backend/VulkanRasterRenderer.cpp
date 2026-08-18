@@ -107,6 +107,9 @@ constexpr std::uint64_t kMaximumLightPacketBytes =
 constexpr VkDeviceSize kHdrPixelBytes = 8;
 // Slot 3 of the sampled resources is the landscape layer array. Slots 0..2
 // stay the material bundle's textures at bindings 1..3.
+// Every sampled slot the material descriptor layout declares. The pipelines
+// statically sample all of them, so all of them must be bound.
+constexpr std::size_t kSampledResourceCount = 4;
 constexpr std::size_t kTerrainLayerTextureSlot = 3;
 // Deformed output is sub-allocated from a ring so a frame never overwrites
 // bytes an earlier submission is still reading.
@@ -536,7 +539,7 @@ struct VulkanRasterRenderer::Impl
     VkPipeline alphaDepthPipeline{VK_NULL_HANDLE};
     VkPipeline tonePipeline{VK_NULL_HANDLE};
     VkSampler sampler{VK_NULL_HANDLE};
-    std::array<SampledResource, 4> sampledResources;
+    std::array<SampledResource, kSampledResourceCount> sampledResources;
     // One per texture-library entry, in library order: the index a material
     // carries is the index into this.
     std::vector<SampledResource> materialTextures;
@@ -693,6 +696,24 @@ struct VulkanRasterRenderer::Impl
         VkImageUsageFlags usage,
         VkImageAspectFlags aspect,
         Image& image) noexcept;
+    // Binds a neutral texture into every sampled slot no captured texture
+    // claimed this frame.
+    //
+    // The material pipelines statically sample bindings 1 through 3. Vulkan
+    // requires every descriptor a bound pipeline statically uses to be valid,
+    // so a frame that supplies only a base colour left the normal and
+    // smooth/spec bindings never written and the shader read undefined
+    // memory. That is not a theoretical hazard: it produced a garbage shading
+    // normal, and the reflection lobe built from it pointed back into the
+    // surface it started on, so every reflection ray in the mirror contract
+    // hit its own mirror 0.007 units away. The validation layer had been
+    // reporting it as "never updated via vkUpdateDescriptorSets" the whole
+    // time.
+    //
+    // Each slot gets the neutral value for what it carries, so a material
+    // that genuinely has no normal map reads flat rather than reading white
+    // as though it were one.
+    [[nodiscard]] abi::Result BindUnclaimedSampledSlots() noexcept;
     [[nodiscard]] abi::Result PrepareSampledTexture(
         const texture::CapturedTexture& source,
         std::uint64_t signature,
@@ -2820,6 +2841,48 @@ abi::Result VulkanRasterRenderer::Impl::PrepareMaterialTextures(
     return abi::Result::Success;
 }
 
+
+abi::Result VulkanRasterRenderer::Impl::BindUnclaimedSampledSlots() noexcept
+{
+    // What each slot carries, so an absent map reads as the absence of that
+    // map rather than as white. A flat normal keeps the shading normal equal
+    // to the geometric one; a neutral mask leaves smoothness where the
+    // material record put it.
+    static constexpr std::array<texture::FallbackTextureRole,
+        kSampledResourceCount> roles{
+        texture::FallbackTextureRole::White,
+        texture::FallbackTextureRole::FlatNormal,
+        texture::FallbackTextureRole::NeutralMask,
+        texture::FallbackTextureRole::White,
+    };
+    static_assert(roles.size() == kSampledResourceCount,
+        "every sampled slot the layout declares needs a neutral value");
+    for (std::size_t slot = 0; slot < sampledResources.size(); ++slot) {
+        // The landscape layer slot is a texture *array*, and it is sampled
+        // only by the terrain pipeline. Vulkan requires validity for the
+        // descriptors the *bound* pipeline statically uses, so a frame that
+        // draws no terrain does not need it -- and a flat 1x1 fallback cannot
+        // satisfy an array view in any case. The terrain route binds its own
+        // neutral base colour where it needs one.
+        if (slot == kTerrainLayerTextureSlot) continue;
+        if (sampledResources[slot].image.image != VK_NULL_HANDLE) continue;
+        try {
+            const auto fallback = texture::MakeFallbackTexture(roles[slot]);
+            // A distinct signature per slot, so the resource cache does not
+            // mistake one slot's neutral texture for another's and skip the
+            // upload.
+            const auto signature = 0xF8A1'0000'0000'0010ull +
+                static_cast<std::uint64_t>(slot);
+            const auto prepared = PrepareSampledTexture(fallback, signature,
+                slot);
+            if (prepared != abi::Result::Success) return prepared;
+        } catch (...) {
+            return abi::Result::InternalFailure;
+        }
+    }
+    return abi::Result::Success;
+}
+
 abi::Result VulkanRasterRenderer::Impl::PrepareSampledTexture(
     const texture::CapturedTexture& source,
     const std::uint64_t signature,
@@ -2900,7 +2963,23 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
         // that casts a hard opaque shadow is wrong, and it is wrong in a way
         // that reads as the shadow pass being broken rather than as the wrong
         // geometry being in the acceleration structure.
-        if (std::any_of(scenePacket.transparent.begin(),
+        //
+        // Classified from the surface, not from the composite table. Whether
+        // a surface is blended is a property of that surface; the table is a
+        // list of draws that happens to name the same objects. Keying on the
+        // table alone meant a render of the same scene *without* the table --
+        // which is exactly how the composite is isolated for measurement --
+        // put every blended surface back into the structure, so the two
+        // renders reflected and shadowed from different geometry while
+        // claiming to differ only by the blended layer.
+        const auto blendedByClass =
+            objectIndex < scenePacket.visibility.size() &&
+            scenePacket.visibility[objectIndex].alpha.classification ==
+                visibility::AlphaClass::Blended;
+        // The table still counts, for a capture that carries no visibility
+        // records at all: absent means every object is opaque, so there would
+        // be nothing to read.
+        if (blendedByClass || std::any_of(scenePacket.transparent.begin(),
                 scenePacket.transparent.end(),
                 [objectIndex](const scene::TransparentDrawRecordV1& record) {
                     return record.objectIndex == objectIndex;
@@ -5059,6 +5138,7 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
     // far one and the result changes with the capture order rather than with
     // the scene.
     if (phase11SceneActive && !scenePacket.transparent.empty() &&
+        (frameFlags & abi::RasterFrameSuppressTransparentComposite) == 0 &&
         blendedScenePipelines[0] != VK_NULL_HANDLE) {
         // The colour target as the opaque pass left it, copied before any
         // blended draw. A refractive surface samples this rather than the
@@ -6497,6 +6577,15 @@ abi::Result VulkanRasterRenderer::Render(
     }
     if (result == abi::Result::Success && (hasScene || hasTerrain)) {
         result = impl_->CreateSceneAttachments();
+    }
+    // After every route that can claim a slot -- material bundle, terrain
+    // layer array, single base texture, texture library -- and before the
+    // upload layout is built. The layout budgets space for exactly the
+    // subresources that are pending when it runs, so a slot claimed after it
+    // has no offsets reserved and no bytes copied, and the frame is refused
+    // for a subresource count that does not match its layout.
+    if (result == abi::Result::Success) {
+        result = impl_->BindUnclaimedSampledSlots();
     }
     const auto uploadLayout = impl_->BuildUploadLayout(packet);
     if (result == abi::Result::Success) {
