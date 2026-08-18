@@ -5675,3 +5675,48 @@ have to move together, so it wants to be a phase of its own rather than the
 tail of a session. Recording it as one item rather than four is the useful
 part: sequencing them as separate tasks would build the same pass three times
 or, worse, three different ones.
+
+## Sky rendering: attempted, reverted, and what it measured
+
+Phase 17 lists "sky and weather resources are not rendered". The design is
+settled and one half of it works; the other does not, and it is reverted
+rather than landed half-working.
+
+The design is not to write a sky. `vfMissRadiance` already computes what a ray
+that leaves the world sees -- it is what a reflection ray uses when it hits
+nothing -- so the sky the camera sees is that same function evaluated along
+the view ray. Any second sky would let the sky in the frame disagree with the
+sky reflected in a window, which is a difference nobody goes looking for.
+
+Built: a full-screen sky pass writing only the HDR attachment before the
+geometry, the reference filling the same radiance before it rasterizes, and
+the inverse view-projection carried to the device, which it never was --
+without it a pass with no geometry cannot recover the ray a pixel stands for.
+
+**The device half does not work.** Measured, not inferred: forcing the
+reference to ambient-only makes the two agree exactly, `hdr-differing=0`. So
+the device's sky never evaluates its sun lobe, and the reference's does. The
+disagreement is 8654 pixels concentrated where the sun is, with a maximum of
+1.375.
+
+That measurement also caught a false fix. Reading the inverse matrix
+transposed in the reference made the comparison read `hdr-differing=0`, which
+looked like the answer and was not: transposing sends the ray somewhere the
+sun is not, so both sides were ambient-only and agreed about nothing. Two unit
+tests now pin the convention against the camera rather than against the other
+implementation -- a clip position must round-trip through the inverse, and the
+ray through the centre of the screen must be the camera's own axis. Row-major
+passes both, which is what `MatrixIndex` says and what the reference was
+already doing.
+
+So the reference is right and the device is wrong, and the cause is not yet
+named. Ruled out: the matrices are row-major on both sides (`vp[14] == 1`
+where a row-major perspective term belongs), the shader and C++ struct agree
+on member order and offset, and the buffer reservation and descriptor range
+both use `sizeof(GpuViewConstantsV1)` so the extra 64 bytes are allocated and
+bound. What that leaves is the uniform's contents at the shader, which wants
+reading back rather than reasoning about.
+
+Reverted to keep the tree green -- the two convention tests are kept, since
+they pin something true regardless of the sky. 415 tests, 414 passing in both
+configurations.

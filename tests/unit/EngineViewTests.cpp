@@ -338,3 +338,80 @@ TEST_CASE("P10_view_orientation_sign_detects_a_winding_reversal",
     Matrix4 zero{};
     CHECK(ViewOrientationSign(zero, identity()) == 1.0f);
 }
+
+TEST_CASE("P10_clip_space_round_trips_through_the_inverse", "[phase10][view]")
+{
+    // The sky is the only pass with no geometry: it has a pixel and has to
+    // recover the ray that pixel stands for, which is the inverse of the
+    // transform every other pass applies forwards. Two conventions are
+    // possible for reading a stored matrix and they differ by a transpose,
+    // which is invisible for a symmetric matrix and wrong for every other.
+    //
+    // Round-tripping settles it without reference to either implementation:
+    // take a clip position, carry it back through the inverse, carry it
+    // forward again, and it must land where it started.
+    const auto view = Translate(Fixture());
+    const std::array<std::array<float, 4>, 3> clipPoints{{
+        {0.0f, 0.0f, 1.0f, 1.0f},
+        {0.5f, -0.25f, 1.0f, 1.0f},
+        {-0.75f, 0.6f, 0.5f, 1.0f}}};
+    for (const auto& clip : clipPoints) {
+        // Row-major, the convention `MatrixIndex` states and every other
+        // reader here uses.
+        std::array<float, 4> world{};
+        for (std::size_t row = 0; row < 4; ++row) {
+            world[row] = 0.0f;
+            for (std::size_t column = 0; column < 4; ++column) {
+                world[row] += view.inverseViewProjection.elements[
+                    row * 4 + column] * clip[column];
+            }
+        }
+        std::array<float, 4> returned{};
+        for (std::size_t row = 0; row < 4; ++row) {
+            returned[row] = 0.0f;
+            for (std::size_t column = 0; column < 4; ++column) {
+                returned[row] += view.viewProjection.elements[
+                    row * 4 + column] * world[column];
+            }
+        }
+        REQUIRE(std::abs(returned[3]) > 1.0e-6f);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            CHECK(returned[axis] / returned[3] ==
+                Catch::Approx(clip[axis] / clip[3]).margin(1.0e-4f));
+        }
+    }
+}
+
+TEST_CASE("P10_the_centre_pixel_ray_is_the_camera_axis", "[phase10][view]")
+{
+    // The round trip above proves the forward and inverse matrices are
+    // consistent with each other; it cannot say which way a reader should
+    // index them, because a transpose of both is equally self-consistent.
+    //
+    // This fixture's view matrix is the identity, so the space the frame is
+    // shaded in is camera space and the ray through the centre of the screen
+    // must be the camera's own axis. That is a fact about the camera, not
+    // about either implementation, so it decides the convention.
+    const auto view = Translate(Fixture());
+    const std::array<float, 4> centre{0.0f, 0.0f, 1.0f, 1.0f};
+
+    const auto project = [&centre](const Matrix4& matrix, const bool rowMajor) {
+        std::array<float, 4> result{};
+        for (std::size_t row = 0; row < 4; ++row) {
+            for (std::size_t column = 0; column < 4; ++column) {
+                result[row] += matrix.elements[rowMajor
+                    ? row * 4 + column : column * 4 + row] * centre[column];
+            }
+        }
+        return result;
+    };
+
+    const auto rowMajor = project(view.inverseViewProjection, true);
+    REQUIRE(std::abs(rowMajor[3]) > 1.0e-6f);
+    // A ray straight ahead has no sideways component. Reading the matrix the
+    // other way puts the far-plane corner here instead, which is off-axis by
+    // the width of the frustum.
+    CHECK(std::abs(rowMajor[0] / rowMajor[3]) < 1.0e-3f);
+    CHECK(std::abs(rowMajor[1] / rowMajor[3]) < 1.0e-3f);
+    CHECK(std::abs(rowMajor[2] / rowMajor[3]) > 1.0e-3f);
+}
