@@ -288,7 +288,8 @@ vec3 vfReflection(
     vec2 hitBary = rayQueryGetIntersectionBarycentricsEXT(query, true);
     vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
         sceneFamilies.records[objectIndex].baseColor.rgb *
-            vfHitVertexColor(hitGeometry, primitive, hitBary));
+            vfHitVertexColor(hitGeometry, primitive, hitBary) *
+            vfHitTexture(hitGeometry, primitive, hitBary));
 
 
     source = kVfReflectionGeometry;

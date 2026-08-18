@@ -405,6 +405,25 @@ ReflectionHit TraceReflection(
             }
             nearest.albedo[channel] = triangle.albedo[channel] * interpolated;
         }
+        // And the texture at that same point, selected per geometry exactly
+        // as the device selects it. Sampled at level zero because a ray
+        // query has no derivatives to pick a level from, which is what the
+        // shader's `textureLod(..., 0.0)` says on the other side.
+        if (triangle.baseColor != nullptr) {
+            auto hitU = 0.0f;
+            auto hitV = 0.0f;
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                hitU += weights[corner] * triangle.texCoord[corner][0];
+                hitV += weights[corner] * triangle.texCoord[corner][1];
+            }
+            texture::SampledColor sampled{};
+            if (texture::SampleTexture2D(*triangle.baseColor, hitU, hitV,
+                    0.0f, sampled) == texture::TexturePacketError::None) {
+                nearest.albedo[0] *= sampled.r;
+                nearest.albedo[1] *= sampled.g;
+                nearest.albedo[2] *= sampled.b;
+            }
+        }
     }
     return nearest;
 }

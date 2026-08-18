@@ -663,3 +663,77 @@ TEST_CASE("P19_a_reflection_hit_interpolates_the_vertex_colour",
     CHECK(hitC.albedo[2] > 0.9f);
     CHECK(hitC.albedo[0] < 0.1f);
 }
+
+TEST_CASE("P19_a_reflection_hit_samples_the_material_texture",
+    "[phase19][reflection]")
+{
+    // The device selects a texture per hit geometry and samples it at the
+    // interpolated coordinate, because a ray query reports the primitive and
+    // its barycentrics but binds no vertex attributes. The oracle has to
+    // select the same texture and sample it the same way, or every textured
+    // surface reflects its base colour instead of its texture.
+    texture::CapturedTexture decoded{};
+    decoded.resourceId = 0x1900'0000'0000'0001ull;
+    decoded.generation = 1;
+    decoded.width = 2;
+    decoded.height = 2;
+    decoded.resourceFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    decoded.viewFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    // Nearest, so the test reads one texel rather than a blend of two and
+    // the expected value does not depend on the filter's weights.
+    decoded.sampler.minFilter = texture::TextureFilter::Nearest;
+    decoded.sampler.magFilter = texture::TextureFilter::Nearest;
+    decoded.sampler.mipFilter = texture::TextureFilter::Nearest;
+    decoded.sampler.maxLod = 0.0f;
+    texture::TextureSubresource level{};
+    level.width = 2;
+    level.height = 2;
+    level.rowPitch = 8;
+    level.slicePitch = 16;
+    // Left column red, right column blue, so a coordinate picks a side.
+    const std::array<std::uint8_t, 16> texels{
+        255, 0, 0, 255, 0, 0, 255, 255,
+        255, 0, 0, 255, 0, 0, 255, 255};
+    level.bytes.resize(texels.size());
+    std::memcpy(level.bytes.data(), texels.data(), texels.size());
+    decoded.subresources.push_back(level);
+
+    // The texture itself reads back before anything asks the reflection to
+    // read it, so a failure below is the reflection path and not the sampler.
+    texture::SampledColor left{};
+    REQUIRE(texture::SampleTexture2D(decoded, 0.05f, 0.5f, 0.0f, left) ==
+        texture::TexturePacketError::None);
+    CHECK(left.r > 0.9f);
+    CHECK(left.b < 0.1f);
+
+    reflect::ReflectionTriangle triangle{};
+    triangle.a = {0.0f, 0.0f, 1.0f};
+    triangle.b = {1.0f, 0.0f, 1.0f};
+    triangle.c = {0.0f, 1.0f, 1.0f};
+    triangle.normal = {0.0f, 0.0f, -1.0f};
+    triangle.albedo = {1.0f, 1.0f, 1.0f};
+    triangle.twoSided = true;
+    triangle.baseColor = &decoded;
+    // The first corner sits in the red half, the second in the blue.
+    triangle.texCoord = {{{0.05f, 0.5f}, {0.95f, 0.5f}, {0.05f, 0.5f}}};
+    const std::array<reflect::ReflectionTriangle, 1> triangles{triangle};
+
+    reflect::ReflectionRay atA{};
+    atA.origin = {0.02f, 0.02f, 0.0f};
+    atA.direction = {0.0f, 0.0f, 1.0f};
+    atA.maximumDistance = 10.0f;
+    const auto hitA = reflect::TraceReflection(triangles, atA);
+    REQUIRE(hitA.hit);
+    CHECK(hitA.albedo[0] > 0.9f);
+    CHECK(hitA.albedo[2] < 0.1f);
+
+    // Near the second corner, where the coordinate lands in the other half.
+    reflect::ReflectionRay atB{};
+    atB.origin = {0.96f, 0.02f, 0.0f};
+    atB.direction = {0.0f, 0.0f, 1.0f};
+    atB.maximumDistance = 10.0f;
+    const auto hitB = reflect::TraceReflection(triangles, atB);
+    REQUIRE(hitB.hit);
+    CHECK(hitB.albedo[2] > 0.9f);
+    CHECK(hitB.albedo[0] < 0.1f);
+}

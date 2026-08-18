@@ -131,7 +131,8 @@ vec3 vfIndirect(
                 rayQueryGetIntersectionBarycentricsEXT(query, true);
             vec3 hitAlbedo = vfApplyTint(sceneFamilies.records[objectIndex],
                 sceneFamilies.records[objectIndex].baseColor.rgb *
-                    vfHitVertexColor(hitGeometry, primitive, hitBary));
+                    vfHitVertexColor(hitGeometry, primitive, hitBary) *
+                    vfHitTexture(hitGeometry, primitive, hitBary));
 
             // Shaded through the same function the raster pass uses, which
             // shadows the bounce surface as well: a room must not brighten

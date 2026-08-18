@@ -242,6 +242,18 @@ vec2 vfHitTexCoord(GpuGeometryRecordV1 record, uint triangle, vec2 bary)
     }
     return total;
 }
+
+// The material texture at a hit, selected per geometry because the query
+// reports no material, and sampled at level zero because a ray query has no
+// derivatives to choose one from. The sentinel means the geometry names no
+// texture, and white leaves the albedo exactly as it was -- the same rule the
+// CPU oracle applies when a triangle carries no texture.
+vec3 vfHitTexture(GpuGeometryRecordV1 record, uint triangle, vec2 bary)
+{
+    if (record.textureIndex == 0xFFFFFFFFu) return vec3(1.0);
+    return textureLod(sceneMaterialTextures[record.textureIndex],
+        vfHitTexCoord(record, triangle, bary), 0.0).rgb;
+}
 #endif
 
 const uint kVfLightTypeAmbient = 0u;

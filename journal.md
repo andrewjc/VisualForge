@@ -5221,3 +5221,85 @@ which is the difference reading as the layer rather than the bounce. The
 bounce and specular terms are gated wherever the pairs do correspond.
 
 396 tests pass in both debug and release.
+
+## Texture fetch at a ray hit, and two defects a white texture was hiding
+
+The fetch itself is small -- the query reports the primitive and the
+barycentrics, the geometry record already names a texture, and
+`vfHitTexCoord` was already written. Landing it took finding two things that
+a solid white base colour had made invisible.
+
+The fixture's base texture was `{255, 255, 255, 255}`. Sampling it returns
+one, so adding the fetch changed nothing on either side and the contract
+passed identically with it and without it. Replacing it with a 2x2 exposed
+both defects at once.
+
+### The reference rasterizer interpolated in screen space
+
+Measured first, then confirmed by reading it: the reference builds
+barycentrics from screen-space edge functions and interpolates `texCoord`
+with them directly, with no perspective divide, while the device is
+perspective-correct. A varying texture on the rotated fixture geometry took
+the raster comparison to **223 interior mismatches** and a G-buffer error of
+`0.359`. Supplying the reciprocal of each vertex's clip w and weighting
+attributes by it takes the same comparison to **0 mismatches** and `0.00046`
+-- a factor of 775.
+
+Coverage and depth still use the screen-space weights, which is correct: a
+pixel is inside the triangle or it is not, and NDC z is already linear in
+screen space. Only attributes needed correcting.
+
+This is why the fixture comment says objects 1 and 2 are kept flat "so the
+rotated object cannot confuse perspective-correct interpolation with the
+oracle's screen-space interpolation". That was a limit on what could be
+tested, and it is gone: no existing expected value moved, because a constant
+attribute interpolates identically either way.
+
+### The reference textured every surface; the device textures none without a library
+
+Two separate halves, both invisible against white:
+
+- The reference applied its single `baseColor` to every reflection triangle,
+  regardless of whether that object's material named a texture. It now
+  resolves the library entry the material names, and leaves the surface
+  untextured when it names none -- which is what the device does.
+- The device resolved *every* material to "no texture", because the family
+  replay never sent a texture library. The raster pass hid it by falling back
+  to the single bound base texture and looking correct; a ray hit has no bound
+  texture to fall back to and silently read white. The frame now carries its
+  library.
+
+Both were found by probing rather than reading: forcing `vfHitTexture` to
+return a constant left the term at `0.00324173` unchanged, and bypassing the
+sentinel branch halved it to `0.00161697` exactly, which located the fault in
+the index rather than the sample.
+
+With both fixed the term moves from `0.00324` to `0.00167` -- the fetch is
+worth 48% of it -- and the two sides agree:
+
+| mutation | signed mean | magnitude-weighted mean |
+| --- | --- | --- |
+| none | 0.59% | 2.90% |
+| no fetch at the hit | 92.4% | 34.5% |
+| texture axes swapped | 3.4% | 5.47% |
+
+The swapped-axes row clears the 5% bound by a thin margin and is caught by
+the magnitude-weighted mean alone, which is the second time that statistic
+has carried a case the signed mean could not see.
+
+## Fallout 4 was updated to 1.11.240 during this session
+
+`unit::P02_installed_build_probe_matches_recorded_install` fails in both
+configurations. It is not caused by any change here: `Fallout4.exe` has a
+modification time of 04:00 today and now reports **1.11.240.0**, while this
+project targets **1.11.221** throughout -- `TargetBuild_1_11_221`,
+`RUNTIME_VERSION_1_11_221`, and the F4SE plugin's `compatibleVersions`, which
+lists 1.11.221 and nothing else.
+
+The gate is refusing an install it was not built for, which is the gate
+working. Live in-engine runs are blocked until either the game is rolled back
+to 1.11.221 or the target is moved to 1.11.240 with an F4SE that supports it.
+Retargeting is not something to do quietly -- the address library file the
+probe expects, `version-1-11-221-0.bin`, is also no longer present in the
+plugin directory. Every other test passes: 396 of 397 in both debug and
+release.

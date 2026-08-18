@@ -3,6 +3,7 @@
 #include "renderer_core/EngineAcceleration.h"
 #include "renderer_core/EngineLighting.h"
 #include "renderer_core/EngineMaterialFamily.h"
+#include "renderer_core/EngineTexture.h"
 
 #include <array>
 #include <cstddef>
@@ -277,6 +278,17 @@ struct ReflectionTriangle
     // value for the whole surface. White leaves `albedo` exactly as it was.
     std::array<std::array<float, 3>, 3> vertexColor{{
         {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}}};
+    // Per-corner texture coordinate, interpolated at the hit by the same
+    // barycentrics, and the texture the device would select for this
+    // geometry. The ray query binds no vertex attributes and reports no
+    // material, so the device resolves a texture index per geometry and
+    // reads the coordinate out of the vertex stream; carrying both here is
+    // what lets the reference sample the same texel.
+    //
+    // Null leaves `albedo` exactly as it was, which is the same thing the
+    // device's no-texture sentinel does.
+    std::array<std::array<float, 2>, 3> texCoord{};
+    const texture::CapturedTexture* baseColor{};
     bool twoSided{};
 };
 

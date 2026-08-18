@@ -507,6 +507,43 @@ texture::CapturedTexture BuildSolidTexture(
     return fixture;
 }
 
+// A 2x2 base colour, so a texture fetch at a ray hit reads something a solid
+// texture cannot distinguish from no fetch at all. Nearest filtering, so the
+// value at a coordinate is one texel and the expected result does not depend
+// on how a filter weights its neighbours.
+texture::CapturedTexture BuildQuadrantTexture(
+    const std::uint64_t resourceId,
+    const std::array<std::array<std::uint8_t, 4>, 4> texels,
+    const texture::TextureFormat viewFormat =
+        texture::TextureFormat::R8G8B8A8Unorm)
+{
+    texture::CapturedTexture fixture{};
+    fixture.resourceId = resourceId;
+    fixture.generation = 1;
+    fixture.width = 2;
+    fixture.height = 2;
+    fixture.resourceFormat = texture::TextureFormat::R8G8B8A8Typeless;
+    fixture.viewFormat = viewFormat;
+    fixture.sampler.minFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.magFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.mipFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.maxLod = 0.0f;
+    texture::TextureSubresource level{};
+    level.width = 2;
+    level.height = 2;
+    level.rowPitch = 8;
+    level.slicePitch = 16;
+    level.bytes.resize(16);
+    for (std::size_t texel = 0; texel < 4; ++texel) {
+        for (std::size_t channel = 0; channel < 4; ++channel) {
+            level.bytes[texel * 4 + channel] =
+                static_cast<std::byte>(texels[texel][channel]);
+        }
+    }
+    fixture.subresources.push_back(std::move(level));
+    return fixture;
+}
+
 // The normal texel is chosen so the two declared encodings reconstruct
 // visibly different vectors from the *same* bytes: the tangent path reads
 // two channels, rebuilds Z, and rotates into the surface frame, while the
@@ -523,8 +560,10 @@ constexpr std::array<std::uint8_t, 4> kFamilyNormalTexel{140, 115, 5, 255};
 material::MaterialReplayBundle BuildFamilyMaterialFixture()
 {
     material::MaterialReplayBundle bundle{};
-    bundle.textures[0] = BuildSolidTexture(
-        0x8000'0000'0000'1601ull, {255, 255, 255, 255},
+    bundle.textures[0] = BuildQuadrantTexture(
+        0x8000'0000'0000'1601ull,
+        {{{255, 255, 255, 255}, {255, 190, 170, 255},
+          {180, 255, 200, 255}, {190, 195, 255, 255}}},
         texture::TextureFormat::R8G8B8A8UnormSrgb);
     bundle.textures[1] = BuildSolidTexture(
         0x8000'0000'0000'1602ull, kFamilyNormalTexel);
@@ -1689,7 +1728,13 @@ std::vector<reflect::ReflectionTriangle> BuildReflectionGeometry(
     const raster::DecodedPacket& projected,
     const std::span<const std::array<float, 3>> vertexPositions,
     const scene::ScenePacket& scenePacket,
-    const material::FamilyPacket& families)
+    const material::FamilyPacket& families,
+    // The frame's texture library. The device resolves one entry per geometry
+    // from the draw's material and samples it at the hit, and a material that
+    // names none leaves the surface untextured. Taking a single texture here
+    // instead would texture every surface, which is invisible only while that
+    // texture is solid white.
+    const std::span<const texture::CapturedTexture> textureLibrary)
 {
     std::vector<reflect::ReflectionTriangle> geometry;
     if (vertexPositions.size() != projected.vertices.size()) return geometry;
@@ -1755,6 +1800,17 @@ std::vector<reflect::ReflectionTriangle> BuildReflectionGeometry(
                     triangle.vertexColor[corner][channel] =
                         vertex.color[channel];
                 }
+                triangle.texCoord[corner][0] = vertex.texCoord[0];
+                triangle.texCoord[corner][1] = vertex.texCoord[1];
+            }
+            triangle.baseColor = nullptr;
+            for (const auto& candidate : projected.materials) {
+                if (candidate.resourceId != draw.materialId) continue;
+                if (candidate.textureIndex < textureLibrary.size()) {
+                    triangle.baseColor =
+                        &textureLibrary[candidate.textureIndex];
+                }
+                break;
             }
             // The instance disables triangle culling, so a reflection sees
             // the back of a surface exactly as the ray query does.
@@ -2367,6 +2423,11 @@ bool AppendShadowFixture(
     }
     raster::RasterMaterialV1 material{};
     material.resourceId = materialId;
+    // This surface is the one every reflection ray in the fixture lands on,
+    // so it is the only place a texture fetch at a hit can be observed.
+    // Naming no texture left both sides skipping the fetch, which passes
+    // whatever either of them computes.
+    material.textureIndex = 0;
     const std::array<float, 4> baseColor{0.85f, 0.85f, 0.88f, 1.0f};
     std::copy(baseColor.begin(), baseColor.end(), material.baseColor);
     source.materials.push_back(material);
@@ -5948,6 +6009,15 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     scene::HdrImage expectedHdr;
     raster::DecodedPacket projected;
     std::vector<std::array<float, 3>> vertexPositions;
+    std::vector<float> inverseW;
+    // The same textures the reference reads, encoded for the device so both
+    // sides resolve a material's texture from the same library.
+    std::vector<std::byte> familyLibraryBytes;
+    if (texture::EncodeTextureLibrary(bundle.textures, familyLibraryBytes) !=
+        texture::TexturePacketError::None) {
+        std::cerr << "family-replay: texture library encode failed" << (char)10;
+        return 5;
+    }
     scene::ReferenceInputs inputs{};
     inputs.baseColor = &bundle.textures[0];
     inputs.normalMap = &bundle.textures[1];
@@ -5979,9 +6049,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     std::uint32_t reflectionProbeHits = 0;
     const auto referenceBuilt =
         scene::ProjectScenePacket(source, frame.views.front(), scenePacket,
-            projected, &vertexPositions) ==
+            projected, &vertexPositions, &inverseW) ==
             scene::ScenePacketError::None &&
         (inputs.vertexPositions = vertexPositions, true) &&
+        (inputs.inverseW = inverseW, true) &&
         [&] {
             if (!options.lit) return true;
             // Neither term, so the reflection can be isolated the same way the
@@ -5998,7 +6069,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
             // and the interior comparison stops isolating the boundary it
             // was written to exclude.
             reflectionGeometry = BuildReflectionGeometry(
-                projected, vertexPositions, scenePacket, familyPacket);
+                projected, vertexPositions, scenePacket, familyPacket,
+                bundle.textures);
             inputs.reflectionGeometry = reflectionGeometry;
             // Probe the fixture with the contract's own tracer before
             // trusting it. A reflective surface whose mirror direction finds
@@ -6145,6 +6217,16 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         request.packetData = reinterpret_cast<std::uintptr_t>(
             packetBytes.data());
         request.packetSize = packetBytes.size();
+        // The frame's texture library, so a material that names one resolves
+        // to it. Without this every material resolves to "no texture", the
+        // raster pass falls back to the single bound base texture and looks
+        // correct, and a ray hit -- which has no bound texture to fall back
+        // to -- silently reads white.
+        if (!familyLibraryBytes.empty()) {
+            request.textureLibraryData = reinterpret_cast<std::uintptr_t>(
+                familyLibraryBytes.data());
+            request.textureLibrarySize = familyLibraryBytes.size();
+        }
         request.outputData = reinterpret_cast<std::uintptr_t>(
             rendered.image.pixels.data());
         request.outputRowPitch = options.width * sizeof(raster::Rgba8);
