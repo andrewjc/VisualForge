@@ -264,11 +264,6 @@ Stated gaps, not silent ones:
 - **Greyscale-to-palette is declared but not applied.** The palette lookup
   texture's slot is not among the recorded role IDs, so applying a palette
   would mean inventing a ramp. The flags travel in the record.
-- **Glow-map modulation is declared but not applied.** The material bundle
-  binds base, normal, and smooth/spec only; the engine's glow map is slot 2
-  of the shader texture set and has no binding here. A glow-mapped material
-  emits its declared colour unmodulated rather than borrowing an unrelated
-  channel.
 - **POM marching is not implemented.** Scale, bias, UV scale, and the step
   range are carried and validated; the march itself is not in the shader.
 - **The installed-corpus sweep has not been run.** The structural half of the
@@ -291,3 +286,29 @@ and real texture sets read from a running Fallout 4 — compared against this
 mirror. That capture is blocked behind the same unresolved item as Phases
 8–15: the world camera has not been located, so no live frame can be
 mirrored yet. See `journal.md` for the camera provenance conclusion.
+
+## Closed since: glow-map modulation
+
+`vfEmission` has taken a glow sample since this phase landed and was called
+with a hardcoded `vec3(1.0)`, so a material declaring a glow map emitted its
+colour unmasked. The map was captured, classified onto
+`MaterialSlotRole::GlowMap`, uploaded to the device and read by nothing.
+
+The binding was never the obstacle. The glow map is slot 2 of the shader
+texture set -- `roles[2]`, set by `MaterialFamily::GlowMap` or by
+`PropertyFlag::GlowMap` -- and the backend already binds that slot at
+descriptor binding 3. The fragment shader simply declared no sampler there.
+
+Both sides now read it, and both apply the same rule: a glow map is a *mask*
+over the declared colour, so a material declaring one and sampling black emits
+nothing, and one declaring none is unmodulated. `ReferenceEmission` takes the
+sample through the same interpolated coordinates the base colour uses.
+
+The fixture exercises it: object 2 declares `OwnEmit | GlowMap`, which makes
+slot 2 required and authored, and the mask's blue channel is zero. A shader
+that carries the map and never reads it emits blue where the material says it
+must not, and the reference comparison sees it -- which is what makes the
+mutation fail rather than pass quietly.
+
+Mutation-verified: restoring the hardcoded white sample fails
+`contract.family_scene_frame`.

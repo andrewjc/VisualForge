@@ -1061,7 +1061,8 @@ void LiftToHorizon(
 
 // Emission is authorized by a declaration and never by a bright colour.
 [[nodiscard]] std::array<float, 3> ReferenceEmission(
-    const material::FamilyRecordV1& family) noexcept
+    const material::FamilyRecordV1& family,
+    const std::array<float, 3>& glowSample) noexcept
 {
     if ((family.emissionFlags & material::GpuEmissionEnabled) == 0) {
         return {};
@@ -1071,8 +1072,17 @@ void LiftToHorizon(
     if ((family.emissionFlags & material::GpuEmissionExternal) != 0) {
         return {};
     }
-    return {family.emissionColor[0], family.emissionColor[1],
-        family.emissionColor[2]};
+    std::array<float, 3> emission{family.emissionColor[0],
+        family.emissionColor[1], family.emissionColor[2]};
+    // Mirrors vfEmission. A glow map is a mask over the declared colour, not
+    // a colour of its own: a material that declares one and samples black
+    // emits nothing, and one that declares none is unmodulated.
+    if ((family.emissionFlags & material::GpuEmissionGlowMap) != 0) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            emission[channel] *= glowSample[channel];
+        }
+    }
+    return emission;
 }
 
 // Delegates to lighting::ShadeSurfaceGpu, which is the same evaluation the
@@ -1493,7 +1503,31 @@ ScenePacketError RenderReferenceGBuffer(
                         // whole image. Only the transparent pass raises it.
                         destination.reactive = 0.0f;
                         if (hdr != nullptr) {
-                            const auto emission = ReferenceEmission(family);
+                            // The glow mask at this point, sampled through
+                            // the same coordinates the base colour used, so
+                            // an emission mask and the surface it masks
+                            // cannot disagree about where they are.
+                            std::array<float, 3> glowSample{1.0f, 1.0f, 1.0f};
+                            if (inputs.glowMap != nullptr) {
+                                const auto glowU =
+                                    weightA * vertexA.texCoord[0] +
+                                    weightB * vertexB.texCoord[0] +
+                                    weightC * vertexC.texCoord[0];
+                                const auto glowV =
+                                    weightA * vertexA.texCoord[1] +
+                                    weightB * vertexB.texCoord[1] +
+                                    weightC * vertexC.texCoord[1];
+                                texture::SampledColor masked{};
+                                if (texture::SampleTexture2D(*inputs.glowMap,
+                                        glowU, glowV, 0.0f, masked) ==
+                                    texture::TexturePacketError::None) {
+                                    glowSample = {masked.r, masked.g,
+                                        masked.b};
+                                }
+                            }
+                            const auto emission =
+                                ReferenceEmission(family, glowSample);
+
                             // The shaded point in the same camera-relative
                             // space the light positions were narrowed into.
                             // The projected vertices hold clip space, so

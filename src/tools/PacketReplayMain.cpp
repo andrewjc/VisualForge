@@ -1644,6 +1644,15 @@ bool BuildFamilySceneObjects(
         capture.slots[1].resourceId = 0x8000'0000'0000'1602ull;
         capture.slots[1].generation = 1;
         capture.slots[1].authored = true;
+        // A glow-mapped material binds the third slot as well, because
+        // declaring the role makes it required -- which is the point of
+        // leaving the others unauthored.
+        if ((flags & static_cast<std::uint64_t>(
+                material::PropertyFlag::GlowMap)) != 0) {
+            capture.slots[2].resourceId = 0x8000'0000'0000'1603ull;
+            capture.slots[2].generation = 1;
+            capture.slots[2].authored = true;
+        }
         capture.slots[7].resourceId = 0x8000'0000'0000'1603ull;
         capture.slots[7].generation = 1;
         capture.slots[7].authored = true;
@@ -1670,8 +1679,16 @@ bool BuildFamilySceneObjects(
     // tangent-space normals. It carries the emission and tangent normal
     // checks, and its bright emit colour is only emissive because the flag
     // says so.
+    //
+    // It also declares a glow map, which puts `MaterialSlotRole::GlowMap` on
+    // its third texture slot and makes that texture a mask over the declared
+    // colour. The mask's blue channel is zero, so a shader that carries the
+    // map and never reads it -- which is what happened, the sample was a
+    // hardcoded white -- emits blue where the material says it must not, and
+    // the reference comparison sees it.
     if (!describe(2, material::MaterialFamily::Default,
-            material::PropertyFlag::OwnEmit,
+            material::PropertyFlag::OwnEmit |
+                material::PropertyFlag::GlowMap,
             {1.0f, 1.0f, 1.0f}, {2.0f, 1.0f, 0.5f}, 3.0f)) {
         return false;
     }
@@ -5705,6 +5722,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     scene::ReferenceInputs inputs{};
     inputs.baseColor = &bundle.textures[0];
     inputs.normalMap = &bundle.textures[1];
+    // The third slot, which a glow-mapped material reads as its emission
+    // mask. The device binds the same texture there.
+    inputs.glowMap = &bundle.textures[2];
+
     inputs.families = &familyPacket;
     if (options.lit) {
         inputs.lights = gpuLights;

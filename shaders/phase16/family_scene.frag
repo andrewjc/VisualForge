@@ -28,6 +28,11 @@ layout(set = 0, binding = 0, std140) uniform MaterialConstants
 
 layout(set = 0, binding = 1) uniform sampler2D baseTexture;
 layout(set = 0, binding = 2) uniform sampler2D normalTexture;
+// The material.s third texture slot. A material that declares
+// MaterialSlotRole::GlowMap there uses it as an emission mask; every other
+// material leaves it bound to the neutral white the backend supplies, which
+// is what makes sampling it unconditionally safe.
+layout(set = 0, binding = 3) uniform sampler2D materialSlotTwo;
 
 layout(location = 0) in vec3 vertexColor;
 layout(location = 1) in vec2 vertexTexCoord;
@@ -134,7 +139,12 @@ void main()
     // colour unmodulated rather than borrowing an unrelated channel. The
     // declaration still travels in the record, so the modulation can be
     // added without another capture change.
-    vec3 emission = vfEmission(familyRecord, vec3(1.0));
+    // The glow mask, sampled through the same coordinates the base colour
+    // used. It was a hardcoded white, so a material declaring a glow map got
+    // its declared colour unmasked and the map was carried to the device and
+    // never read.
+    vec3 emission = vfEmission(familyRecord,
+        texture(materialSlotTwo, vertexTexCoord).rgb);
     // The mirrored opaque scene receives captured direct and ambient light,
     // then fog, in linear HDR. Emission is added after shading because it is
     // radiance the surface emits rather than reflects.

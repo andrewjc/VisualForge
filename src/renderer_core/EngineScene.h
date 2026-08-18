@@ -370,6 +370,11 @@ struct ReferenceInputs
 {
     const texture::CapturedTexture* baseColor{};
     const texture::CapturedTexture* normalMap{};
+    // The material.s third texture slot, which a material declaring
+    // MaterialSlotRole::GlowMap uses as its emission mask. Absent means the
+    // mask is white, which leaves a declared emission colour unmodulated --
+    // exactly what every material without a glow map already gets.
+    const texture::CapturedTexture* glowMap{};
     const material::FamilyPacket* families{};
     // Absent means no lights and no environment, which shades exactly as the
     // earlier phases did and keeps their references byte-identical. These are
