@@ -7,6 +7,11 @@
 // Mirrors gi::QualityPreset::raysPerPixel for the fixture. The oracle uses
 // the same count and walks the same sequence, so the two integrate the same
 // set of directions rather than two different estimates of one integral.
+// The frame.s declared bounce count, defaulted to the contract.s eight when
+// the frame declares none. A constant here made the estimate a property of
+// the build rather than of the frame, and a live frame and a comparison
+// frame do not want the same estimate.
+const uint kVfIndirectRaysMaximum = 8u;
 const uint kVfIndirectRays = 8u;
 const uint kVfIndirectSkipped = 0u;
 const uint kVfIndirectGeometry = 1u;
@@ -52,7 +57,10 @@ vec3 vfIndirect(
 {
     source = kVfIndirectSkipped;
     vec3 total = vec3(0.0);
-    if (kVfIndirectRays == 0u) return total;
+    uint declared = sceneEnvironment.record.flagsAndCount.z;
+    uint rays = declared == 0u
+        ? kVfIndirectRays : min(declared, kVfIndirectRaysMaximum);
+    if (rays == 0u) return total;
 
     GpuEnvironmentV1 environment = sceneEnvironment.record;
     // No captured lighting means no light to bounce. Phase 17 established
@@ -71,7 +79,7 @@ vec3 vfIndirect(
     bool sawGeometry = false;
     bool sawEnvironment = false;
 
-    for (uint ray = 0u; ray < kVfIndirectRays; ++ray) {
+    for (uint ray = 0u; ray < rays; ++ray) {
         vec2 xi = vfSampleSequence(pixelX, pixelY, frameIndex, ray);
         vec3 direction;
         if (!vfSampleDiffuseDirection(normal, xi, direction)) continue;

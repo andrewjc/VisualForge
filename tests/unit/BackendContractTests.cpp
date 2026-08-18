@@ -419,8 +419,20 @@ TEST_CASE("PM_backend_ABI_appends_the_library_generation_after_the_library",
     // field it knows at the offset it expects and simply never sees this one.
     CHECK(offsetof(RasterFrameRequestV1, textureLibraryGeneration) ==
         kRasterFrameRequestV1TextureLibraryRequiredSize);
-    CHECK(kRasterFrameRequestV1LibraryGenerationRequiredSize ==
+    // Each extension is appended after the last, so the newest requirement is
+    // the one that reaches the end of the struct. Pinning *this* field to the
+    // end instead made the assertion a statement about which extension came
+    // last, which is true until the next one lands and says nothing about the
+    // property the test is named for.
+    CHECK(kRasterFrameRequestV1LibraryGenerationRequiredSize <=
         sizeof(RasterFrameRequestV1));
+    CHECK(offsetof(RasterFrameRequestV1, indirectRaysPerPixel) ==
+        kRasterFrameRequestV1LibraryGenerationRequiredSize);
+    CHECK(kRasterFrameRequestV1LibraryGenerationRequiredSize <
+        kRasterFrameRequestV1IndirectRaysRequiredSize);
+    // The bounce count is a policy, and zero is reserved for "the frame
+    // declares none" so an older caller traces exactly what it always did.
+    CHECK(kDefaultIndirectRaysPerPixel == 8);
     // A caller that fills only through the library declares a size below the
     // generation requirement, which is what lets the backend tell "no
     // generation tracked" from "a generation at a stale offset" and fall back

@@ -368,8 +368,11 @@ constexpr std::uint64_t kMirrorMoonLightId = 0x4D4F4F4E00000001ull;
 bool s_mirrorIndirectDisabled = false;
 std::uint64_t s_mirrorIndirectOnUs = 0;
 std::uint64_t s_mirrorIndirectOffUs = 0;
-std::uint64_t s_mirrorIndirectOnFrames = 0;
-std::uint64_t s_mirrorIndirectOffFrames = 0;
+std::uint64_t s_mirrorWindowUs = 0;
+std::uint64_t s_mirrorWindowSettled = 0;
+std::uint64_t s_mirrorWindowFrames = 0;
+std::uint64_t s_mirrorIndirectOnSettled = 0;
+std::uint64_t s_mirrorIndirectOffSettled = 0;
 // The frame's light packet, empty whenever the sun could not be resolved.
 // Empty is a real answer: the backend then has no environment and leaves the
 // albedo alone, which is correct behaviour for a session whose volumetric
@@ -2468,6 +2471,18 @@ bool CompositeMirrorImpl(
 
     abi::RasterFrameRequestV1 request{};
     request.structSize = sizeof(request);
+    // No declared bounce count, which the backend reads as the contract's
+    // eight.
+    //
+    // Lowering it was measured to save nothing. Alternating the term off in
+    // adjacent windows puts the whole diffuse bounce at under one per cent of
+    // a mirrored frame -- 96,851 us against 96,129 us at eight rays a pixel,
+    // and the same within noise at two. There is no reason to spend image
+    // quality on it, so the mirror declares no policy and takes the default.
+    //
+    // The capability stays because the frame is entitled to declare its own
+    // estimate and the replay tool declares one explicitly; what changed is
+    // that the mirror has no measured reason to.
     if (!s_mirrorLight.empty()) {
         request.lightData = reinterpret_cast<std::uint64_t>(
             s_mirrorLight.data());
@@ -2540,25 +2555,49 @@ bool CompositeMirrorImpl(
     // switched in windows rather than per frame so the swapchain, the resident
     // set and the acceleration structure all settle before either mean is
     // taken.
-    if (s_mirrorIndirectDisabled) {
-        s_mirrorIndirectOffUs += renderUs;
-        ++s_mirrorIndirectOffFrames;
-    } else {
-        s_mirrorIndirectOnUs += renderUs;
-        ++s_mirrorIndirectOnFrames;
+    // One window at a time, and the two compared as *adjacent* windows.
+    //
+    // Cumulative means do not work here. The mirrored frame gets steadily
+    // heavier while a cell streams in, so whichever accumulator started later
+    // samples the heavier frames -- and the first two versions of this probe
+    // both reported the diffuse bounce as cheaper than no bounce at all,
+    // which is drift, not a result. Adjacent windows are two seconds apart and
+    // see the same scene.
+    //
+    // Settled frames only within each window, because a cell arriving costs
+    // seconds and one such frame moves a 120-frame mean more than the term
+    // being measured does.
+    constexpr std::uint64_t kSettledFrameUs = 250'000;
+    constexpr std::uint64_t kWindowFrames = 120;
+    if (renderUs <= kSettledFrameUs) {
+        s_mirrorWindowUs += renderUs;
+        ++s_mirrorWindowSettled;
     }
-    if ((s_mirrorIndirectOnFrames + s_mirrorIndirectOffFrames) % 120 == 0) {
+    ++s_mirrorWindowFrames;
+    if (s_mirrorWindowFrames == kWindowFrames) {
+        const auto mean = s_mirrorWindowSettled != 0
+            ? s_mirrorWindowUs / s_mirrorWindowSettled : 0ull;
+        if (s_mirrorIndirectDisabled) {
+            s_mirrorIndirectOffUs = mean;
+            s_mirrorIndirectOffSettled = s_mirrorWindowSettled;
+        } else {
+            s_mirrorIndirectOnUs = mean;
+            s_mirrorIndirectOnSettled = s_mirrorWindowSettled;
+        }
+        s_mirrorWindowUs = 0;
+        s_mirrorWindowSettled = 0;
+        s_mirrorWindowFrames = 0;
         s_mirrorIndirectDisabled = !s_mirrorIndirectDisabled;
-        if (s_mirrorIndirectOnFrames >= 240 &&
-            s_mirrorIndirectOffFrames >= 240) {
-            log::Write("renderer-indirect-ab: on-frames=%llu on-mean-us=%llu "
-                "off-frames=%llu off-mean-us=%llu",
-                static_cast<unsigned long long>(s_mirrorIndirectOnFrames),
-                static_cast<unsigned long long>(
-                    s_mirrorIndirectOnUs / s_mirrorIndirectOnFrames),
-                static_cast<unsigned long long>(s_mirrorIndirectOffFrames),
-                static_cast<unsigned long long>(
-                    s_mirrorIndirectOffUs / s_mirrorIndirectOffFrames));
+        // Both halves must have produced a window, and enough settled frames
+        // in each for the mean to mean anything.
+        if (s_mirrorIndirectOnSettled >= 60 &&
+            s_mirrorIndirectOffSettled >= 60) {
+            log::Write("renderer-indirect-ab: on-settled=%llu on-mean-us=%llu "
+                "off-settled=%llu off-mean-us=%llu",
+                static_cast<unsigned long long>(s_mirrorIndirectOnSettled),
+                static_cast<unsigned long long>(s_mirrorIndirectOnUs),
+                static_cast<unsigned long long>(s_mirrorIndirectOffSettled),
+                static_cast<unsigned long long>(s_mirrorIndirectOffUs));
         }
     }
     if (!renderOk) {

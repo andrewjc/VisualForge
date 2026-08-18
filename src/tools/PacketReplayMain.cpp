@@ -5662,7 +5662,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         }
         gpuEnvironment = lighting::BuildGpuEnvironment(
             lightPacket.environment,
-            static_cast<std::uint32_t>(gpuLights.size()));
+            static_cast<std::uint32_t>(gpuLights.size()),
+            // The oracle integrates the contract.s count, so the device must
+            // trace the same one or the two estimate different integrals.
+            abi::kDefaultIndirectRaysPerPixel);
     }
 
     abi::AdapterLuid luid{};

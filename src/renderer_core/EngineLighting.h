@@ -182,9 +182,13 @@ struct alignas(16) GpuEnvironmentV1
     std::uint32_t flagsAndCount[4]{};
 };
 
+// `indirectRays` is the per-pixel bounce count the frame declares. It travels
+// in the environment's own flags-and-counts vector because that is what the
+// vector is for, alongside the active light count.
 [[nodiscard]] GpuEnvironmentV1 BuildGpuEnvironment(
     const EnvironmentRecordV1& record,
-    std::uint32_t activeLightCount) noexcept;
+    std::uint32_t activeLightCount,
+    std::uint32_t indirectRays) noexcept;
 
 // Evaluation from the GPU records, mirroring phase17/lighting.glsl branch
 // for branch. The reference evaluates these and not the host records,

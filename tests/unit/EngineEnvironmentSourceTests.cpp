@@ -491,7 +491,7 @@ TEST_CASE("the measured sun shades differently along different normals")
     REQUIRE(environment::MakeDirectionalLight(record, 0x5000'0000'0000'0001ull, sun)
             == environment::EnvironmentSourceError::None);
 
-    const auto gpu = lighting::BuildGpuEnvironment(record, 1);
+    const auto gpu = lighting::BuildGpuEnvironment(record, 1, 8);
     lighting::GpuLightRecordV1 gpuSun{};
     REQUIRE(lighting::BuildGpuLight(sun, {0.0, 0.0, 0.0}, gpuSun)
             == lighting::LightError::None);

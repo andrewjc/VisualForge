@@ -409,7 +409,8 @@ LightError BuildGpuLight(
 
 GpuEnvironmentV1 BuildGpuEnvironment(
     const EnvironmentRecordV1& record,
-    const std::uint32_t activeLightCount) noexcept
+    const std::uint32_t activeLightCount,
+    const std::uint32_t indirectRays) noexcept
 {
     GpuEnvironmentV1 gpu{};
     for (std::size_t channel = 0; channel < 3; ++channel) {
@@ -428,6 +429,7 @@ GpuEnvironmentV1 BuildGpuEnvironment(
     gpu.fogColorAndPower[3] = record.fogPower;
     gpu.flagsAndCount[0] = record.flags | EnvironmentPresent;
     gpu.flagsAndCount[1] = activeLightCount;
+    gpu.flagsAndCount[2] = indirectRays;
     return gpu;
 }
 

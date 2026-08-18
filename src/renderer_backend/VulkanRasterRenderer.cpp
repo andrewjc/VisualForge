@@ -598,6 +598,9 @@ struct VulkanRasterRenderer::Impl
     // The frame flags the caller declared, kept for the passes that are
     // recorded after the request is out of scope.
     std::uint32_t frameFlags{};
+    // The bounce count this frame declared, or the contract.s default when it
+    // declared none.
+    std::uint32_t indirectRaysPerPixel{abi::kDefaultIndirectRaysPerPixel};
     // The post rules the caller declared for this frame.
     struct BloomRequest
     {
@@ -4353,7 +4356,8 @@ abi::Result VulkanRasterRenderer::Impl::UploadPacket(
             // albedo alone, exactly as every phase before this one did.
             const auto environment = phase17LightingActive
                 ? lighting::BuildGpuEnvironment(lightPacket.environment,
-                      static_cast<std::uint32_t>(activeLights))
+                      static_cast<std::uint32_t>(activeLights),
+                      indirectRaysPerPixel)
                 : lighting::GpuEnvironmentV1{};
             std::memcpy(destination + layout.phase17EnvironmentOffset,
                 &environment, sizeof(environment));
@@ -6619,6 +6623,11 @@ abi::Result VulkanRasterRenderer::Render(
     // above. A frame that supplies no history simply leaves the pixel count at
     // zero and the pass records nothing.
     impl_->frameFlags = request.flags;
+    impl_->indirectRaysPerPixel =
+        request.structSize >= abi::kRasterFrameRequestV1IndirectRaysRequiredSize &&
+            request.indirectRaysPerPixel != 0
+        ? request.indirectRaysPerPixel
+        : abi::kDefaultIndirectRaysPerPixel;
     if (request.structSize >= abi::kRasterFrameRequestV1BloomRequiredSize) {
         impl_->bloomRequest.threshold = request.bloomThreshold;
         impl_->bloomRequest.knee = request.bloomKnee;

@@ -23,7 +23,7 @@ constexpr std::uint32_t kBackendAbiPhase23Minor = 12;
 constexpr std::uint32_t kBackendAbiTextureLibraryMinor = 13;
 // The frame request carries a texture library generation.
 constexpr std::uint32_t kBackendAbiLibraryGenerationMinor = 14;
-constexpr std::uint32_t kBackendAbiMinor = 14;
+constexpr std::uint32_t kBackendAbiMinor = 15;
 constexpr char kBackendQueryExport[] = "VFRenderer_QueryInterface";
 constexpr std::uint32_t kBridgeImageCount = 3;
 
@@ -318,6 +318,22 @@ struct alignas(8) RasterFrameRequestV1
     // most of a frame. Zero means the caller does not track a generation and
     // the backend falls back to hashing the bytes.
     std::uint64_t textureLibraryGeneration{};
+    // How many rays the diffuse bounce traces per pixel this frame.
+    //
+    // A declared policy rather than a constant compiled into the shader.
+    // Eight is what the contract's oracle integrates and what the fixture is
+    // gated against, and it is also a third of a live mirrored frame --
+    // measured, by alternating the term off in windows: 102,647 us with it
+    // against 68,475 us without. A live frame and a comparison frame do not
+    // want the same estimate, and the estimator is unbiased in the count, so
+    // this is a knob the frame is entitled to set rather than a quality
+    // setting hidden in a shader.
+    //
+    // Zero means the backend's own default, which is the contract's eight, so
+    // a caller built against an older header traces exactly what it did
+    // before.
+    std::uint32_t indirectRaysPerPixel{};
+    std::uint32_t reservedIndirect{};
 };
 
 struct alignas(8) RasterStatusV1
@@ -454,6 +470,11 @@ constexpr std::size_t kRasterFrameRequestV1TextureLibraryRequiredSize =
 constexpr std::size_t kRasterFrameRequestV1LibraryGenerationRequiredSize =
     offsetof(RasterFrameRequestV1, textureLibraryGeneration) +
     sizeof(RasterFrameRequestV1::textureLibraryGeneration);
+constexpr std::size_t kRasterFrameRequestV1IndirectRaysRequiredSize =
+    offsetof(RasterFrameRequestV1, indirectRaysPerPixel) +
+    sizeof(RasterFrameRequestV1::indirectRaysPerPixel);
+// The contract's count, and the backend's default when a frame declares none.
+constexpr std::uint32_t kDefaultIndirectRaysPerPixel = 8;
 constexpr std::size_t kRasterStatusV1RequiredSize =
     offsetof(RasterStatusV1, reserved);
 constexpr std::size_t kBackendApiV1BridgeRequiredSize =

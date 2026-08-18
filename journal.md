@@ -4306,36 +4306,62 @@ after a rebuild that had not actually happened. Re-running it against a clean
 tree is what separated "the sort breaks these tests" from "these tests assume
 an order" -- and only one of those is a reason not to sort.
 
-## A third of the frame is the diffuse bounce, measured
+## The diffuse bounce is not a third of the frame, and the first two measurements said it was
 
-The mirror presents a world frame for the first time, and it costs about
-100 ms. `prepare-us` is 0.27 ms and `upload-us` is 0.07 ms, so nothing about
-building or shipping the packet is the problem; `render-us` is nearly all of
-it and `gpu-wait` is nearly all of that.
+The mirror presents a world frame for the first time and it costs about 96 ms.
+`prepare-us` is 0.27 ms and `upload-us` is 0.07 ms, so nothing about building
+or shipping the packet is the problem; `render-us` is nearly all of it and
+`gpu-wait` is nearly all of that.
 
-The diffuse bounce was the first suspect -- eight rays a pixel at 1280x720 is
-7.4 million rays a frame against a structure holding every drawn object -- but
-a suspect is not a measurement, and the term cannot be separated by reading a
-frame time with it switched on. `EnvironmentIndirectDisabled` already existed
-so a contract could render without it, so the mirror now alternates it in
-120-frame windows and reports both means. One run, both numbers, the same cell
-and the same camera under each.
+The diffuse bounce was the obvious suspect -- eight rays a pixel at 1280x720
+is 7.4 million rays a frame against a structure holding every drawn object --
+so `EnvironmentIndirectDisabled` was alternated in windows to separate it.
+
+**The first two versions of that probe both reported a result, and both were
+wrong.**
+
+The first compared cumulative means and reported 102,647 us with the bounce
+against 68,475 us without: a third of the frame. That was recorded here as a
+measurement. It was not one. `mirror-worst-us` reaches 4.6 million -- a cell
+arriving costs seconds -- and one such frame moves a few-hundred-frame mean
+further than the term being measured does.
+
+The second excluded frames over 250 ms as stalls and reported the bounce as
+*cheaper* than no bounce at all, which is not a result either. Both
+accumulators were still cumulative, the mirrored frame gets steadily heavier
+while a cell streams in, and whichever accumulator started later sampled the
+heavier frames. The sign of the answer was decided by which half started
+first.
+
+The third compares **adjacent** 120-frame windows, settled frames only. Two
+seconds apart, same scene, same camera:
 
 ```text
-renderer-indirect-ab: on-frames=720 on-mean-us=102647 off-frames=720 off-mean-us=68475
+renderer-indirect-ab: on-settled=120 on-mean-us=96851 off-settled=120 off-mean-us=96129
+renderer-indirect-ab: on-settled=120 on-mean-us=96434 off-settled=120 off-mean-us=96222
 ```
 
-**34 ms of a 103 ms frame, or a third of it.** Without the bounce the mirror
-runs at about 14.6 frames a second instead of 9.7.
+**Under one per cent, at eight rays a pixel.** The same within noise at two.
+The diffuse bounce costs essentially nothing, and the 96 ms is somewhere else
+entirely.
 
-That is not an argument for removing it. It is the concrete motivation for
-Phase 20's outstanding half: `ReflectionHistoryKey`, `ResetHistory` and the
-half-resolution mapping are all implemented and tested on the CPU precisely so
-that fewer rays can be traced and reconstructed, and none of them has a
-history resource on the device yet. Eight raw samples a pixel every frame is
-what a renderer does when it has no temporal reconstruction, and the cost of
-not having it is now a number rather than an assumption.
+So the ray count is not the lever it looked like. It is still a real capability
+-- `RasterFrameRequestV1::indirectRaysPerPixel`, zero meaning the backend's
+default of eight, so an older caller traces exactly what it did before, and
+the estimator averages so the count is unbiased in it -- and the replay tool
+declares the contract's eight explicitly rather than inheriting it. But the
+mirror declares nothing, because there is no measured reason to spend image
+quality here.
 
-Windows rather than alternate frames, so the swapchain, the resident set and
-the acceleration structure all settle before either mean is taken. The first
-report is withheld until both halves have 240 frames, for the same reason.
+What this leaves is the honest position: **the frame is 96 ms, `gpu-wait` is
+nearly all of it, and the diffuse bounce is ruled out.** The reflection term,
+the shadow ray per light per pixel, the five-attachment G-buffer at 1280x720
+and the sheer 1.19 M vertices across 940 draws are all still candidates, and
+none of them has been separated yet. The probe that can separate them now
+exists and is known to be sound; pointing it at the next term is the work.
+
+Three attempts to measure one number, two of them producing a confident wrong
+answer that survived being written down. The lesson is not about indirect
+light: a mean over a window that spans a streaming event, or two accumulators
+that do not start together, will produce a number with a plausible magnitude
+and an arbitrary sign.
