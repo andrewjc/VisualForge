@@ -49,12 +49,19 @@ to composite something — inheriting it made every one of them draw no layer.
 
 Stated gaps, not silent ones:
 
-- **Decals are composited but not projected.** `TransparentDrawRecordV1`
-  carries the projection volume, and the contract measures `decal-covered` and
-  `decal-clipped`, but the shader does not yet project a decal onto the
-  surface it reaches. `vfProjectDecal` was written and removed because it had
-  no caller; the projection now exists in the packet, so the caller is what is
-  missing rather than the data.
+- **`decal-shaded` reads zero and nothing gates it.** The projection itself is
+  implemented and called: `TransparentDrawRecordV1` carries the volume,
+  `vfProjectDecal` applies range, radius and facing, and `family_scene.frag`
+  discards a fragment the volume rejects. `decal-covered` is 5,028 and
+  `decal-clipped` is 20, both gated and both satisfied.
+
+  But `decal-shaded` differences the projecting render against one with the
+  projection disabled, and it reads 0 while 20 pixels are demonstrably being
+  discarded. Two renders that must differ do not, by that measure. Either the
+  measure is wrong or the disabled variant is not disabling what it claims,
+  and until that is settled it is a number that looks like evidence and is
+  not. It is reported and ungated, which is the right way round for something
+  unexplained, but it is not resolved.
 - **Particles are not a separate path.** They composite through the same
   blended draws as everything else, with no simulation, no sorting by system,
   and no GPU particle buffer.
