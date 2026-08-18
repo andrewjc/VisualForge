@@ -4597,3 +4597,64 @@ this hold still" is answered as well against the previous sample as against
 the previous frame. That is the same rule the mesh-churn monitor already
 follows, and it was worth applying before the instrument became part of the
 cost it was measuring.
+
+## The frame, end to end: 95 ms to 33 ms
+
+Two changes did nearly all of it, and both were found by ablation rather than
+by reasoning about what ought to be slow.
+
+**The packet generation.** The backend rebuilt the decoded raster packet from
+66 MB every frame. The host already encodes it from a cache that hits 96% of
+the time, so on most frames it was handing over bytes it had handed over
+before. Declaring a generation -- the same mechanism the texture library
+already used -- took `prepare-us` from 34,718 to 5,997.
+
+**The refit.** `accel::DecideBuild` had said since phase 18 that a structure
+whose topology is unchanged may be updated rather than rebuilt, and nothing
+called it. It is now what the backend does, with the topology signed
+separately from the placements so a refit can never cross the line the
+function draws. That took the acceleration cost from about 19 ms to about 7.
+
+Neither was possible earlier in the session. The refit needs the structure's
+topology to hold still while the player walks, which is what anchoring it to a
+world origin established, and it needs the geometry set to be stable frame to
+frame, which is what identity ordering established -- and identity ordering was
+landed to fix the mirror never presenting at all, not for performance.
+
+```text
+renderer-term-ab: all-on-us=32935 no-bounce-us=34504 no-reflection-us=35269
+                  no-shadow-us=32576 no-accel-us=25685
+renderer-suppression: frames=2940 mirror-mean-us=49255 presented=yes
+```
+
+The settled frame is about 33 ms. The mirror's mean is 49 ms because it
+includes the streaming stalls, which reach four seconds and are their own
+problem.
+
+### What the ablations say now
+
+Of ~33 ms: about 7 ms is the acceleration work, and the three ray-traced terms
+remain within noise of all-on. Overdraw is 0.89. `prepare` is 5 ms, `upload` 4
+ms, `readback` 0.3 ms. So roughly 26 ms is still the device doing the raster
+and whatever else sits inside `gpu-wait`, and no ablation yet separates it.
+
+### The scoreboard, because it is the transferable part
+
+Six performance hypotheses were tested this session. Four were wrong: the
+diffuse bounce (measured at a third of the frame by a cumulative mean spanning
+a streaming stall, actually under 1%), the build quality preset (no effect),
+the missing depth prepass (overdraw is 0.89, so there was nothing to remove),
+and the rebuild quantum (coarsening it made the skip rate fall). Two were
+right: the packet generation and the acceleration rebuild.
+
+Every one was settled by a measurement costing a query pool or a frame flag,
+and two of the wrong ones would have produced large, confident, useless
+changes -- the depth prepass in particular was hours of work on the core pass.
+
+The three measurement defects behind the wrong answers are worth more than the
+answers: a cumulative mean spanning a streaming event yields a plausible
+magnitude with an arbitrary sign; two accumulators that do not start together
+measure drift rather than the term; and a stage timer read while the stage is
+being skipped reports that the stage is free. All three produced numbers that
+looked like evidence, and one of them was written into this journal as a
+finding before it was caught.
