@@ -1526,8 +1526,18 @@ std::vector<reflect::ReflectionTriangle> BuildReflectionGeometry(
             triangle.c = vertexPositions[c];
             triangle.normal = {object.geometricNormal[0],
                 object.geometricNormal[1], object.geometricNormal[2]};
-            triangle.albedo = {record.tintColor[0], record.tintColor[1],
-                record.tintColor[2]};
+            // The same rule the shader applies: the surface's own colour,
+            // modulated by a tint only where one is declared. `tintColor[3]`
+            // carries that declaration, which is why a zero tint and an
+            // absent tint stay distinguishable.
+            const auto tinted = record.tintColor[3] != 0.0f;
+            triangle.albedo = {
+                record.baseColor[0] *
+                    (tinted ? record.tintColor[0] : 1.0f),
+                record.baseColor[1] *
+                    (tinted ? record.tintColor[1] : 1.0f),
+                record.baseColor[2] *
+                    (tinted ? record.tintColor[2] : 1.0f)};
             // The instance disables triangle culling, so a reflection sees
             // the back of a surface exactly as the ray query does.
             triangle.twoSided = true;
@@ -2041,6 +2051,20 @@ bool BuildMirrorFixture(
         object.boundsMinimum[1] = -1.0f;
         object.boundsMaximum[0] = 1.0f;
         object.boundsMaximum[1] = 1.2f;
+        // The world-space face normal, which the local -Z of the triangle
+        // becomes once the piece is yawed. Left at zero, this fixture traced
+        // rays whose origin was offset off the surface by a zero vector, so
+        // every one of them re-hit the surface it started on: the hit path
+        // ran on essentially every mirror pixel and the reflection was of the
+        // mirror itself, which is identical whether or not the target exists.
+        // That is why the reflection measured zero while the host tracer,
+        // which offsets along its own geometry, hit the target at 1.5.
+        object.geometricNormal[0] = -std::sin(piece.yaw);
+        object.geometricNormal[1] = 0.0f;
+        object.geometricNormal[2] = -std::cos(piece.yaw);
+        std::copy(std::begin(object.geometricNormal),
+            std::end(object.geometricNormal),
+            std::begin(object.shadingNormal));
         scenePacket.objects.push_back(object);
         SetSceneModel(scenePacket.objects.back(), piece.scale, piece.yaw,
             piece.translation);
@@ -5136,7 +5160,20 @@ int RenderMirrorScene(const FamilyRenderOptions& options)
                 capture.featureId = material::FeatureIdOf(
                     material::MaterialFamily::Default);
                 capture.baseTechniqueId = 0x1900;
+                // The tint is what a reflection hit shades with: the ray
+                // query has no vertex attributes bound, so `reflection.glsl`
+                // reads `tintColor` and never the material's base colour.
+                // Declaring white here for every object made the bright
+                // target reflect exactly as the mirror does, so the fixture
+                // could not show a reflection carrying it however correct the
+                // trace was -- the one thing the fixture exists to measure.
                 capture.tintColor = {1.0f, 1.0f, 1.0f};
+                for (const auto& material : variant.source.materials) {
+                    if (material.resourceId != object.materialId) continue;
+                    capture.baseColor = {material.baseColor[0],
+                        material.baseColor[1], material.baseColor[2]};
+                    break;
+                }
                 capture.emitColor = {0.0f, 0.0f, 0.0f};
                 capture.emitScale = 1.0f;
                 capture.subsurfaceRolloff = 0.4f;
@@ -5355,8 +5392,22 @@ int RenderMirrorScene(const FamilyRenderOptions& options)
         }
     }
 
+    // The raster is destroyed while the module that created it is still
+    // loaded. Leaving it to the destructors tore the Vulkan device down after
+    // the DLL had gone, which the release build reported as a crash at exit
+    // -- after every comparison above had already printed "pass". Every other
+    // mode does this; this one was written without it and was never
+    // registered as a test, so nothing noticed.
+    abi::RasterStatusV1 destroyStatus{};
+    destroyStatus.structSize = sizeof(destroyStatus);
+    const auto destroyed = host.DestroyRaster(destroyStatus);
+    const auto shutdown = host.RequestShutdown();
+    const auto lifecyclePass = destroyed &&
+        destroyStatus.validationErrorCount == 0 &&
+        shutdown.error == BackendHostError::ShutdownDeferred;
+
     const auto passed = mirrorPixels > 0 && reflectedPixels > 0 &&
-        validationErrors == 0;
+        validationErrors == 0 && lifecyclePass;
     std::cout << "mirror-replay extent=" << options.width << char{120}
               << options.height
               << " mirror-pixels=" << mirrorPixels
@@ -5368,6 +5419,7 @@ int RenderMirrorScene(const FamilyRenderOptions& options)
               << " host-trace-distance=" << hostTraceDistance
               << " traced-vs-fallback=" << tracedDifferingPixels
               << " validation-errors=" << validationErrors
+              << " lifecycle=" << (lifecyclePass ? "pass" : "fail")
               << " result=" << (passed ? "pass" : "fail") << (char)10;
     return passed ? 0 : 1;
 }
@@ -5790,6 +5842,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     auto bloomRendered = false;
     std::vector<raster::Rgba8> bloomPixels;
     auto additiveOnlyRendered = false;
+    // The additive render with its layer suppressed, which is what the
+    // "never darker" bound is measured against.
+    std::vector<std::array<float, 4>> additiveBaselineHdr;
+    auto additiveBaselineRendered = false;
     // The same frame with the geometry behind the refractive quad recoloured.
     std::vector<std::array<float, 4>> recolouredHdr;
     auto recolouredRendered = false;
@@ -5867,6 +5923,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
             baselineGbuffer.assign(rendered.gbuffer.size(),
                 scene::GBufferPixelV1{});
             auto baselineRequest = request;
+            // This baseline is also the surface-data and HDR reference the
+            // CPU oracle is compared against, so it stays the full scene.
             baselineRequest.sceneData = reinterpret_cast<std::uintptr_t>(
                 opaqueSceneBytes.data());
             baselineRequest.sceneSize = opaqueSceneBytes.size();
@@ -5938,6 +5996,45 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
                 std::cerr << "family-replay: additive submission failed"
                              " diagnostic=" << additiveStatus.diagnostic
                           << (char)10;
+            }
+            // The additive layer's own baseline: the identical packet, with
+            // the composite suppressed and nothing else changed.
+            //
+            // The shared baseline above cannot serve here. It carries no
+            // transparent table at all, and a blended draw is excluded from
+            // the acceleration structure exactly when the table names it --
+            // so the additive quad reflected into the shared baseline and
+            // not into the render that composites it. The layer then
+            // appeared to darken 212 pixels it never touched, which reads as
+            // a blending defect and is not one. It stayed hidden for as long
+            // as a reflection shaded black whatever it hit.
+            if (additiveOnlyRendered) {
+                additiveBaselineHdr.assign(renderedHdr.size(),
+                    std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f});
+                std::vector<scene::GBufferPixelV1> suppressedGbuffer(
+                    rendered.gbuffer.size());
+                std::vector<raster::Rgba8> suppressedImage(
+                    rendered.image.pixels.size());
+                auto suppressedRequest = additiveRequest;
+                suppressedRequest.flags |=
+                    abi::RasterFrameSuppressTransparentComposite;
+                suppressedRequest.gbufferData =
+                    reinterpret_cast<std::uintptr_t>(
+                        suppressedGbuffer.data());
+                suppressedRequest.outputData =
+                    reinterpret_cast<std::uintptr_t>(suppressedImage.data());
+                suppressedRequest.hdrData = reinterpret_cast<std::uintptr_t>(
+                    additiveBaselineHdr.data());
+                abi::RasterStatusV1 suppressedStatus{};
+                suppressedStatus.structSize = sizeof(suppressedStatus);
+                additiveBaselineRendered = static_cast<bool>(
+                    host.RenderRasterFrame(suppressedRequest,
+                        suppressedStatus));
+                if (!additiveBaselineRendered) {
+                    std::cerr << "family-replay: additive baseline submission"
+                                 " failed diagnostic="
+                              << suppressedStatus.diagnostic << (char)10;
+                }
             }
             // And once with bloom armed. The same scene and the same
             // exposure, differing only in the post flag, so the two outputs
@@ -6295,10 +6392,11 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     // what is behind it, which makes this bound exact rather than
     // approximate: one darker pixel means the blend factors are wrong, the
     // layer landed in the wrong attachment, or it replaced instead of added.
-    if (options.transparency && baselineRendered && additiveOnlyRendered) {
+    if (options.transparency && additiveBaselineRendered &&
+        additiveOnlyRendered) {
         for (std::size_t index = 0; index < pixelCount; ++index) {
-            const std::array<float, 3> want{baselineHdr[index][0],
-                baselineHdr[index][1], baselineHdr[index][2]};
+            const std::array<float, 3> want{additiveBaselineHdr[index][0],
+                additiveBaselineHdr[index][1], additiveBaselineHdr[index][2]};
             const auto& got = additiveOnlyHdr[index];
             auto brighter = false;
             auto darker = false;
@@ -6784,7 +6882,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         // "never darker" trivially, and a coplanar draw rejected by a strict
         // depth test does exactly that while reporting no error at all.
         (!options.transparency ||
-            (baselineRendered && transparentDarkerPixels == 0 &&
+            (additiveBaselineRendered &&
+                transparentDarkerPixels == 0 &&
                 transparentBrighterPixels > 0)) &&
         // Sorted, not taken in capture order.
         (!options.transparency ||

@@ -217,7 +217,18 @@ enum RasterCreateFlag : std::uint32_t
 // only way to demonstrate that is to render the same frame both ways.
 enum RasterFrameFlag : std::uint32_t
 {
-    RasterFrameBloom = 1u << 0
+    RasterFrameBloom = 1u << 0,
+    // Records the frame without compositing its blended layer.
+    //
+    // Isolation, not a feature switch. Measuring what the blended layer added
+    // means rendering the same frame twice and differencing, and the frame
+    // has to be the *same* one: the previous baseline removed the transparent
+    // table instead, but the acceleration structure excludes blended geometry
+    // because that table names it, so the baseline reflected and shadowed
+    // from surfaces the composite render did not have. The two then differed
+    // by the blended layer plus a different set of occluders, which is not
+    // what the comparison claims to measure.
+    RasterFrameSuppressTransparentComposite = 1u << 1
 };
 
 struct alignas(8) RasterCreateRequestV1
