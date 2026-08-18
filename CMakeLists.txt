@@ -538,6 +538,8 @@ add_library(vf_core STATIC
     src/renderer_core/EngineAcceleration.cpp
     src/renderer_core/EngineDrawStream.cpp
     src/renderer_core/EngineImageSpace.cpp
+    src/renderer_core/EngineArchive.cpp
+    src/renderer_core/EngineMaterialFile.cpp
     src/renderer_core/EngineInflate.cpp
     src/renderer_core/EngineIndirect.cpp
     src/renderer_core/EngineTransparency.cpp

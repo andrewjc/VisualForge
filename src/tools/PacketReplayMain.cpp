@@ -1,5 +1,7 @@
 #include "renderer_api/RasterPacket.h"
+#include "renderer_core/EngineArchive.h"
 #include "renderer_core/EngineMaterial.h"
+#include "renderer_core/EngineMaterialFile.h"
 #include "renderer_core/EngineMesh.h"
 #include "renderer_core/EngineDeformation.h"
 #include "renderer_core/EngineScene.h"
@@ -8504,8 +8506,161 @@ void PrintUsage()
 
 }
 
+
+// Phase 16's corpus sweep. The gate asks which material families actually
+// occur in the installed archive and at what frequency; every earlier answer
+// here was structural -- the fallback path means nothing can fail to resolve
+// -- rather than measured.
+//
+// The parse is required to consume each file exactly. A field order that is
+// wrong but self-consistent reads every field without complaining and stops
+// somewhere else, so "parsed" alone would not distinguish a correct layout
+// from a plausible one.
+[[nodiscard]] int SweepMaterialArchive(const std::filesystem::path& path)
+{
+    std::vector<std::byte> bytes;
+    {
+        std::ifstream file{path, std::ios::binary};
+        if (!file) {
+            std::cerr << "material-sweep: cannot open " << path.string()
+                      << (char)10;
+            return 2;
+        }
+        file.seekg(0, std::ios::end);
+        const auto size = static_cast<std::size_t>(file.tellg());
+        file.seekg(0, std::ios::beg);
+        bytes.resize(size);
+        file.read(reinterpret_cast<char*>(bytes.data()),
+            static_cast<std::streamsize>(size));
+        if (!file) {
+            std::cerr << "material-sweep: read failed" << (char)10;
+            return 2;
+        }
+    }
+
+    archive::Archive contents;
+    const auto read = archive::ReadArchive(bytes, contents);
+    if (read != archive::ArchiveError::None) {
+        std::cerr << "material-sweep: archive error="
+                  << archive::ToString(read) << (char)10;
+        return 3;
+    }
+
+    std::uint64_t extracted = 0;
+    std::uint64_t extractFailures = 0;
+    std::uint64_t parsed = 0;
+    std::map<std::string, std::uint64_t> parseFailures;
+    std::map<std::string, std::uint64_t> familyCounts;
+    std::map<std::string, std::uint64_t> flagCounts;
+    std::map<std::string, std::uint64_t> slotCounts;
+
+    std::vector<std::byte> contentsBytes;
+    materialfile::MaterialFile material;
+    for (const auto& entry : contents.entries) {
+        if (archive::ExtractEntry(bytes, entry, contentsBytes) !=
+            archive::ArchiveError::None) {
+            ++extractFailures;
+            continue;
+        }
+        ++extracted;
+        const auto result =
+            materialfile::ParseMaterialFile(contentsBytes, material);
+        if (result != materialfile::MaterialFileError::None) {
+            ++parseFailures[materialfile::ToString(result)];
+            continue;
+        }
+        ++parsed;
+        ++familyCounts[material::ToString(
+            materialfile::ClassifyMaterialFile(material))];
+        // The declarations themselves, counted separately from the family
+        // they imply. The family is a rule applied to these; the counts below
+        // are what the corpus says, and stay meaningful if the rule changes.
+        const auto count = [&flagCounts](const char* name, const bool set) {
+            if (set) ++flagCounts[name];
+        };
+        count("alpha-blend", material.alphaBlend);
+        count("alpha-test", material.alphaTest);
+        count("two-sided", material.twoSided);
+        count("decal", material.decal);
+        count("refraction", material.refraction);
+        count("environment-mapping", material.environmentMapping);
+        count("environment-mapping-eye", material.environmentMappingEye);
+        count("environment-mapping-window", material.environmentMappingWindow);
+        count("greyscale-to-palette-colour", material.grayscaleToPaletteColor);
+        count("greyscale-to-palette-alpha", material.grayscaleToPaletteAlpha);
+        count("glowmap", material.glowmap);
+        count("emit-enabled", material.emitEnabled);
+        count("external-emittance", material.externalEmittance);
+        count("back-lighting", material.backLighting);
+        count("rim-lighting", material.rimLighting);
+        count("subsurface-lighting", material.subsurfaceLighting);
+        count("anisotropic-lighting", material.anisotropicLighting);
+        count("model-space-normals", material.modelSpaceNormals);
+        count("specular-enabled", material.specularEnabled);
+        count("tessellate", material.tessellate);
+        count("hair", material.hair);
+        count("tree", material.tree);
+        count("face-gen", material.faceGen);
+        count("skin-tint", material.skinTint);
+        count("screen-space-reflections", material.screenSpaceReflections);
+        count("non-occluder", material.nonOccluder);
+        // Which slots are actually authored. The family flags say what a
+        // material claims to be; these say what it ships. Phase 16 held back
+        // the greyscale-to-palette ramp on the grounds that applying one
+        // would mean inventing it, and held back POM for want of a height
+        // map -- both are questions about whether slot 3 and slot 8 carry
+        // anything, which is a count rather than a judgement.
+        static const std::array<const char*, 9> kShaderSlots{
+            "diffuse", "normal", "smoothness", "greyscale", "environment",
+            "glow", "inner-layer", "wrinkles", "displacement"};
+        static const std::array<const char*, 5> kEffectSlots{
+            "effect-base", "effect-greyscale", "effect-environment",
+            "effect-normal", "effect-environment-mask"};
+        if (material.kind == materialfile::MaterialFileKind::Shader) {
+            for (std::size_t slot = 0; slot < material.textures.size();
+                 ++slot) {
+                if (!material.textures[slot].empty()) {
+                    ++slotCounts[kShaderSlots[slot]];
+                }
+            }
+        } else {
+            for (std::size_t slot = 0; slot < material.effectTextures.size();
+                 ++slot) {
+                if (!material.effectTextures[slot].empty()) {
+                    ++slotCounts[kEffectSlots[slot]];
+                }
+            }
+        }
+    }
+
+    std::cout << "material-sweep archive=" << path.filename().string()
+              << " version=" << contents.version
+              << " entries=" << contents.entries.size()
+              << " extracted=" << extracted
+              << " extract-failures=" << extractFailures
+              << " parsed-exactly=" << parsed;
+    for (const auto& failure : parseFailures) {
+        std::cout << " parse-" << failure.first << "=" << failure.second;
+    }
+    for (const auto& family : familyCounts) {
+        std::cout << " family:" << family.first << "=" << family.second;
+    }
+    for (const auto& flag : flagCounts) {
+        std::cout << " flag:" << flag.first << "=" << flag.second;
+    }
+    for (const auto& slot : slotCounts) {
+        std::cout << " slot:" << slot.first << "=" << slot.second;
+    }
+    std::cout << " result="
+              << (parsed == contents.entries.size() ? "pass" : "fail")
+              << (char)10;
+    return parsed == contents.entries.size() ? 0 : 1;
+}
 int main(const int argc, const char* const* argv)
 {
+    if (argc == 3 && std::string_view{argv[1]} == "--sweep-materials") {
+        return SweepMaterialArchive(std::filesystem::path{argv[2]});
+    }
     if (argc == 3 && std::string_view{argv[1]} == "--inspect") {
         return InspectFile(std::filesystem::path{argv[2]});
     }

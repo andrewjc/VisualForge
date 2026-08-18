@@ -5483,3 +5483,72 @@ cut, and the two sides agree about both:
 Both halves are held: the device must ask about the candidate and the
 structure must let it, and the reference must sample the same texture. 398 of
 399 in both configurations.
+
+## Phase 16's corpus sweep, run
+
+The sweep was recorded as the one unmeasured half of Phase 16's first gate
+clause: the structural half is satisfied by construction, since the fallback
+path means nothing can fail to resolve, but which families actually occur in
+`Fallout4 - Materials.ba2` and at what frequency had never been counted.
+
+Running it needed three pieces this renderer did not have: a BA2 reader, a
+DEFLATE decompressor, and a parser for Bethesda's authored material files.
+All three are written and tested.
+
+**6899 entries, 6899 extracted, 6899 parsed exactly.** The parse is required
+to consume each file to the byte, which is what makes the number mean
+anything: a field order that is wrong but self-consistent reads every field
+without complaint and stops somewhere else. Landing exactly on the end for
+every one of 6899 files, across two different layouts, is the evidence that
+the layouts are right.
+
+### Families
+
+| family | count | share |
+| --- | --- | --- |
+| Default | 3991 | 57.8% |
+| EnvironmentMap | 2356 | 34.2% |
+| None (effect materials) | 283 | 4.1% |
+| GlowMap | 151 | 2.2% |
+| TreeAnimation | 60 | 0.9% |
+| SkinTint | 20 | 0.3% |
+| HairTint | 18 | 0.3% |
+| Face | 12 | 0.2% |
+| Eye | 8 | 0.1% |
+
+Nine of the twenty-three families this renderer classifies occur at all, and
+two of them are 92% of the corpus. The absent ones are not evidence of a gap:
+Landscape, Snow, LodLandscape and the rest are selected by the engine from
+geometry and region data rather than from a material file, so a material
+archive cannot contain them.
+
+A material declares several of these at once -- a hair material is also
+environment mapped, an eye material is also face-generated -- so the table
+above is a stated rule applied to the flags, most specific first. The flag
+counts are reported alongside it and stay meaningful if the rule changes:
+`environment-mapping=2533`, `specular-enabled=6149`, `alpha-test=1892`,
+`two-sided=913`, `alpha-blend=611`, `subsurface-lighting=429`,
+`non-occluder=381`, `decal=530`, `glowmap=154`, `emit-enabled=157`.
+
+### Two other Phase 16 blockers, answered by the same run
+
+The sweep also counts which texture slots are actually authored, and that
+settles two items this phase had deferred on the grounds that the data was
+not there:
+
+- **The greyscale-to-palette ramp exists.** 287 materials author slot 3, and
+  319 declare `grayscaleToPaletteColor`. The phase doc held the palette back
+  because "the palette lookup texture's slot is not among the recorded role
+  IDs, so applying a palette would mean inventing a ramp". Measured, the ramp
+  is not missing from the corpus at all -- it is missing from the *capture*.
+  That is a different and much smaller problem than inventing data.
+- **POM has inputs.** 58 materials author a displacement map. Small, 0.8% of
+  the corpus, but not zero, so the march has real height data to run against
+  rather than a synthetic one.
+
+Also measured: `inner-layer=4`, so multi-layer parallax is effectively absent
+from this corpus and is not worth a shader path on its own evidence.
+
+The sweep runs against the installed archive and so is not a ctest -- the
+parsers are covered by synthetic fixtures instead, 412 tests passing in both
+configurations with the one build-probe failure against the updated game.
