@@ -5720,3 +5720,43 @@ reading back rather than reasoning about.
 Reverted to keep the tree green -- the two convention tests are kept, since
 they pin something true regardless of the sky. 415 tests, 414 passing in both
 configurations.
+
+### Sky, second attempt: what was ruled out, and why it stopped
+
+Rebuilt and reverted again. The value of the attempt is what it eliminated,
+so that is recorded rather than the disappointment.
+
+Ruled out by direct measurement, not by reading code:
+
+- **The extended view constants reach the shader.** `spirv-dis` on the sky
+  shader shows the block's member 3 at offset 192 and a total of 304, which
+  is what the C++ struct and the reflection assertion both say. A shader
+  probe returning green when `inverseViewProjectionRows[3].w != 0` came back
+  green over the whole sky.
+- **The matrix the device gets is the matrix the reference uses.** Both were
+  printed: the replay's record reads row0
+  `0.7698, 0, 0, -0.000751758` and row3 `0, 0, -9.99, 10`; the backend's
+  uploaded copy reads the same to the precision printed.
+- **The pixel-to-clip mapping agrees exactly.** With both sides emitting
+  their own NDC instead of radiance, `hdr-differing` is **0**. It is also the
+  measurement that settles the Y convention: `2t - 1` agrees and `1 - 2t`
+  disagrees by a full 2.0, which is a sign flip.
+- **The earlier "transposed reference agrees" result was false.** Transposing
+  sends the ray where the sun is not, so both sides went ambient-only and
+  agreed about nothing. Two unit tests now pin the convention against the
+  camera instead: a clip position must round-trip through the inverse, and
+  the centre ray must be the camera's own axis. Row major passes both.
+
+And here is why it stopped: with the same matrix, the same NDC and the same
+formula, the two still produce different directions -- `hdr-differing=36417`,
+max `0.608`. Those four results cannot all be true. At least one probe is not
+measuring what it claims, and the likeliest candidate is which *render* the
+comparison actually reads: with shadows and lighting the HDR comparison runs
+on the deterministic pair, `termWithHdr` against `shadowedUnindirectHdr`,
+which are separate submissions from the ones the earlier probes assumed.
+
+Drawing a conclusion from mutually inconsistent instruments is how the
+transposed "fix" got believed in the first place. The next step is to make
+the sky probe report which submission it read before comparing anything, and
+that is a change to the harness rather than to the sky. 415 tests, 414
+passing in both configurations, and the sky is out of the tree.
