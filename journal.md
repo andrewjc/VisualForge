@@ -5576,3 +5576,61 @@ changes is only that the ramp is no longer hypothetical -- 287 of them ship
 in the archive -- so adding a role for it captures real data rather than
 inventing any. That is a smaller claim than the one made above and it is the
 one the measurement supports.
+
+## Parallax occlusion marches
+
+Phase 16 recorded that "scale, bias, UV scale, and the step range are carried
+and validated; the march itself is not in the shader". The march is in the
+shader now, mirrored on the CPU, and held by three mutations.
+
+Everything it needed was already on the GPU. The scale, bias and UV scale ride
+in `parallax`, and the step range was already riding in the spare wetness
+lanes with a comment saying why. The one missing piece was the height field
+itself: the four sampled slots are all spoken for -- the fourth is the terrain
+layer array -- so the height map arrives through the frame's texture library
+instead, indexed from the family record, which is a table that already exists
+rather than a fifth binding for one feature.
+
+The reference needed the normals *before* it samples the base colour, because
+the march decides which texel that sample reads. Rather than move a
+fifty-line block inside a long function, the normal computation is now a
+helper called once and reused, which is a smaller edit and removes the chance
+of two copies drifting.
+
+### Two fixtures that measured nothing
+
+The first version passed every mutation, and so did the second.
+
+The height field was a two-texel step. That is enough to show a march happens
+and not enough to show whether it marched the right *distance*: with two
+values the ray either stops at once or runs to the end, and every step count
+lands on the same texel. Replaced with a 16x16 diagonal ramp, so the distance
+is observable and neither axis of the sweep can be ignored.
+
+That was not sufficient either, because the surface faced the camera. A height
+field displaces along the view direction *projected into the surface*, so a
+surface seen face-on sweeps nowhere and the march is a no-op however correct
+it is. What looked like the march working -- 35922 bytes of the frame changing
+when the fixture was enabled -- was object 1 gaining a family record it had
+never had, and nothing to do with parallax at all.
+
+With the surface turned 0.9 radians and the ramp in place:
+
+| mutation | interior mismatches | G-buffer max error |
+| --- | --- | --- |
+| none | 0 | 0.00078 |
+| step range reversed | 37 | 0.299 |
+| interpolation dropped (plain parallax, not occlusion) | 51 | 0.299 |
+| march skipped entirely | 80 | 0.299 |
+
+### What this does not claim
+
+The march is the textbook one and the two sides agree on it exactly. Whether
+the *convention* matches Bethesda's shader -- how deep a given `parallaxScale`
+is meant to push, which channel of the height map is read -- is not something
+offline work can answer. It is a choice, both sides make the same one, and
+only a captured frame settles whether it is the engine's. That is stated in
+the shader and in the mirror beside the code rather than left to be
+discovered.
+
+413 tests, 412 passing in both configurations.

@@ -4705,9 +4705,32 @@ abi::Result VulkanRasterRenderer::Impl::UploadPacket(
         // surface, so the shader always has a valid per-object entry.
         for (std::size_t objectIndex = 0;
              objectIndex < scenePacket.objects.size(); ++objectIndex) {
-            const auto record = material::BuildFamilyGpuRecord(
-                material::ResolveFamilyRecord(familyPacket,
-                    scenePacket.objects[objectIndex].objectId));
+            const auto resolved = material::ResolveFamilyRecord(familyPacket,
+                scenePacket.objects[objectIndex].objectId);
+            auto record = material::BuildFamilyGpuRecord(resolved);
+            // Which library entry holds this material's height field. The
+            // record names it by resource id, and only the frame knows where
+            // that landed in the uploaded library, so the two are joined
+            // here. One-based, because zero is the first library entry and
+            // has to stay distinguishable from "this material has none".
+            for (const auto& slot : resolved.slots) {
+                if (slot.role !=
+                    static_cast<std::uint8_t>(
+                        material::MaterialSlotRole::Height) ||
+                    slot.resourceId == 0) {
+                    continue;
+                }
+                for (std::size_t entry = 0; entry < materialTextures.size();
+                     ++entry) {
+                    if (materialTextures[entry].source.resourceId !=
+                        slot.resourceId) {
+                        continue;
+                    }
+                    record.subsurface[3] = static_cast<float>(entry + 1);
+                    break;
+                }
+                break;
+            }
             std::memcpy(destination + layout.phase16FamilyOffset +
                     objectIndex * sizeof(record),
                 &record, sizeof(record));

@@ -22,6 +22,80 @@ void vfOrthonormalBasis(vec3 n, out vec3 t, out vec3 b)
     b = vec3(c, s + n.y * n.y * a, -n.y);
 }
 
+
+// Parallax occlusion mapping: the texture coordinate is moved along the view
+// direction until it lands where the height field would actually be seen,
+// rather than where the flat surface is.
+//
+// The step count varies with the angle because that is where the cost and the
+// artefact both are: a surface seen face-on needs almost none, and one seen
+// edge-on steps a long way across the height field between samples and
+// staircases if it takes too few. The record carries the range, so a material
+// that needs more gets more.
+//
+// This is the textbook march, mirrored exactly on the CPU side, so the two
+// agree with each other. Whether the convention agrees with Bethesda's own
+// shader is not something offline work can answer -- the depth a given
+// `parallaxScale` produces is a choice, and only a captured frame settles it.
+vec2 vfParallaxOffset(
+    GpuFamilyRecordV1 record,
+    sampler2D heightMap,
+    vec2 texCoord,
+    vec3 geometric,
+    vec3 toViewer)
+{
+    if (!vfHasFeature(record, kVfFeatureParallaxOcclusion)) return texCoord;
+    vec3 tangent;
+    vec3 bitangent;
+    vfOrthonormalBasis(geometric, tangent, bitangent);
+    // The view direction in the surface's own frame. Its z is the cosine
+    // against the surface, and a ray travelling along the surface has no
+    // depth to march through.
+    vec3 view = vec3(dot(toViewer, tangent), dot(toViewer, bitangent),
+        dot(toViewer, geometric));
+    if (!(view.z > 1.0e-4)) return texCoord;
+
+    float minimumSteps = max(1.0, record.wetnessHigh.z);
+    float maximumSteps = max(minimumSteps, record.wetnessHigh.w);
+    float steps = mix(maximumSteps, minimumSteps, clamp(view.z, 0.0, 1.0));
+    float layerDepth = 1.0 / steps;
+    vec2 scaledCoord = texCoord * record.parallax.zw;
+    // The total distance the coordinate may travel, which is what
+    // `parallaxScale` means: a scale of zero leaves a flat surface.
+    vec2 sweep = (view.xy / view.z) * record.parallax.x;
+    vec2 stepDelta = sweep * layerDepth;
+
+    float currentDepth = 0.0;
+    vec2 current = scaledCoord;
+    float sampled = textureLod(heightMap, current, 0.0).r + record.parallax.y;
+    // Bounded by the step count rather than by the exit condition alone: a
+    // height field that never rises above the ray would otherwise march
+    // forever.
+    for (float step = 0.0; step < maximumSteps; step += 1.0) {
+        if (sampled <= currentDepth) break;
+        current -= stepDelta;
+        currentDepth += layerDepth;
+        sampled = textureLod(heightMap, current, 0.0).r + record.parallax.y;
+    }
+
+    // The intersection is between the last two samples, not at either of
+    // them. Taking the nearer one is plain parallax mapping and steps
+    // visibly; interpolating is what makes it occlusion mapping.
+    vec2 previous = current + stepDelta;
+    float afterDepth = sampled - currentDepth;
+    float beforeDepth = textureLod(heightMap, previous, 0.0).r +
+        record.parallax.y - currentDepth + layerDepth;
+    float span = beforeDepth - afterDepth;
+    float weight = abs(span) > 1.0e-6 ? beforeDepth / span : 0.0;
+    vec2 marched = mix(current, previous, clamp(weight, 0.0, 1.0));
+    // Back out of the height field's own UV scale, so the offset applies to
+    // the coordinate the surface is shaded with.
+    vec2 unscaled = record.parallax.zw;
+    return vec2(
+        unscaled.x != 0.0 ? marched.x / unscaled.x : texCoord.x,
+        unscaled.y != 0.0 ? marched.y / unscaled.y : texCoord.y);
+}
+
 // Model-space normals must never pass through the tangent-normal path. The
 // two decodes read a different number of channels *and* land in different
 // spaces: a model-space texel is already absolute, while a tangent-space

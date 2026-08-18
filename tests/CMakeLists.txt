@@ -263,6 +263,19 @@ if(TARGET VisualForgeRenderer)
         RUN_SERIAL TRUE
     )
 
+    add_test(NAME contract.family_parallax_frame
+        COMMAND $<TARGET_FILE:vf_packet_replay>
+            --render-family-scene
+            --parallax
+            --backend $<TARGET_FILE:VisualForgeRenderer>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/phase16-parallax.ppm
+            --validation
+    )
+    set_tests_properties(contract.family_parallax_frame PROPERTIES
+        LABELS "contract;gpu;phase16"
+        RUN_SERIAL TRUE
+    )
+
     add_test(NAME contract.texture_library_frame
         COMMAND $<TARGET_FILE:vf_packet_replay>
             --render-texture-library

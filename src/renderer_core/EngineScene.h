@@ -447,6 +447,10 @@ struct ReferenceInputs
     // means screen-space, which agrees only while the attribute is constant
     // across the triangle or the triangle faces the camera.
     std::span<const float> inverseW{};
+    // The height field a parallax-occlusion material marches. Absent means no
+    // material in the frame marches one, which is the state every fixture
+    // before this one was in.
+    const texture::CapturedTexture* heightMap{};
     // Occluders in the same camera-relative space as the lights and the
     // shaded positions, which is the space the top-level structure is built
     // in. Absent means an unshadowed reference: exactly what a device without

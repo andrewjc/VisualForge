@@ -1013,6 +1013,143 @@ void ReferenceOrthonormalBasis(
     bitangent = {c, s + n[1] * n[1] * a, -n[1]};
 }
 
+
+// The interpolated surface normals for one covered pixel. Extracted rather
+// than left inline because the height march needs them *before* the base
+// colour is sampled -- it decides which texel that sample reads -- while the
+// shading that follows needs them after. One copy, called twice at most,
+// beats two copies that can drift.
+struct ReferenceSurfaceNormals
+{
+    std::array<float, 3> geometric{};
+    std::array<float, 3> shading{};
+};
+
+[[nodiscard]] ReferenceSurfaceNormals ComputeReferenceNormals(
+    const raster::RasterVertexV3& vertexA,
+    const raster::RasterVertexV3& vertexB,
+    const raster::RasterVertexV3& vertexC,
+    const float weightA,
+    const float weightB,
+    const float weightC,
+    const scene::InstanceV1& instance,
+    const OpaqueObjectV1& object,
+    const float faceSign) noexcept
+{
+    ReferenceSurfaceNormals result{};
+    // Interpolated across the triangle, exactly as the vertex stage hands it
+    // to the fragment stage. Taking the object's own axis instead shades
+    // every surface of an object as one flat plane, and the oracle would then
+    // disagree with the backend on every curved surface -- a difference that
+    // looks like a backend fault rather than like two different normals.
+    const std::array<float, 3> localNormal{
+        weightA * vertexA.normal[0] + weightB * vertexB.normal[0] +
+            weightC * vertexC.normal[0],
+        weightA * vertexA.normal[1] + weightB * vertexB.normal[1] +
+            weightC * vertexC.normal[1],
+        weightA * vertexA.normal[2] + weightB * vertexB.normal[2] +
+            weightC * vertexC.normal[2]};
+    // Rotated by the instance's upper 3x3, because the vertex normal is in
+    // the same local space the vertex position is, and the shader rotates it
+    // there too. Interpolating and then forgetting to rotate leaves every
+    // rotated object lit as though it had never turned.
+    std::array<float, 3> interpolated{};
+    for (std::size_t row = 0; row < 3; ++row) {
+        interpolated[row] = instance.model[row * 4 + 0] * localNormal[0] +
+            instance.model[row * 4 + 1] * localNormal[1] +
+            instance.model[row * 4 + 2] * localNormal[2];
+    }
+    const auto interpolatedLength = std::sqrt(
+        interpolated[0] * interpolated[0] +
+        interpolated[1] * interpolated[1] +
+        interpolated[2] * interpolated[2]);
+    // The same threshold the shader applies, so a mesh without usable normals
+    // falls back on both sides at the same moment rather than at two
+    // different ones.
+    const auto useVertexNormal = interpolatedLength > 1.0e-4f;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        result.geometric[axis] = useVertexNormal
+            ? interpolated[axis] / interpolatedLength * faceSign
+            : object.geometricNormal[axis] * faceSign;
+        result.shading[axis] = useVertexNormal
+            ? interpolated[axis] / interpolatedLength * faceSign
+            : object.shadingNormal[axis] * faceSign;
+    }
+    static_cast<void>(NormalizeReferenceNormal(result.geometric));
+    return result;
+}
+
+// Mirrors vfParallaxOffset in shaders/phase16/family_shading.glsl, step for
+// step. The march is a loop with an early exit and an interpolation at the
+// end, and every one of those is a place the two sides can part company, so
+// this is written to follow the shader rather than to be tidy.
+[[nodiscard]] std::array<float, 2> ReferenceParallaxOffset(
+    const float* const parallax,
+    const float minimumStepsIn,
+    const float maximumStepsIn,
+    const texture::CapturedTexture& heightMap,
+    const std::array<float, 2>& texCoord,
+    const std::array<float, 3>& geometric,
+    const std::array<float, 3>& toViewer) noexcept
+{
+    std::array<float, 3> tangent{};
+    std::array<float, 3> bitangent{};
+    ReferenceOrthonormalBasis(geometric, tangent, bitangent);
+    const auto project = [&toViewer](const std::array<float, 3>& axis) {
+        return toViewer[0] * axis[0] + toViewer[1] * axis[1] +
+            toViewer[2] * axis[2];
+    };
+    const std::array<float, 3> view{
+        project(tangent), project(bitangent), project(geometric)};
+    if (!(view[2] > 1.0e-4f)) return texCoord;
+
+    const auto minimumSteps = std::max(1.0f, minimumStepsIn);
+    const auto maximumSteps = std::max(minimumSteps, maximumStepsIn);
+    const auto blend = std::clamp(view[2], 0.0f, 1.0f);
+    const auto steps = maximumSteps + (minimumSteps - maximumSteps) * blend;
+    const auto layerDepth = 1.0f / steps;
+    std::array<float, 2> current{
+        texCoord[0] * parallax[2], texCoord[1] * parallax[3]};
+    const std::array<float, 2> stepDelta{
+        (view[0] / view[2]) * parallax[0] * layerDepth,
+        (view[1] / view[2]) * parallax[0] * layerDepth};
+
+    const auto height = [&heightMap, parallax](
+        const std::array<float, 2>& at) {
+        texture::SampledColor sampled{};
+        if (texture::SampleTexture2D(heightMap, at[0], at[1], 0.0f,
+                sampled) != texture::TexturePacketError::None) {
+            return parallax[1];
+        }
+        return sampled.r + parallax[1];
+    };
+
+    auto currentDepth = 0.0f;
+    auto sampled = height(current);
+    for (auto step = 0.0f; step < maximumSteps; step += 1.0f) {
+        if (sampled <= currentDepth) break;
+        current[0] -= stepDelta[0];
+        current[1] -= stepDelta[1];
+        currentDepth += layerDepth;
+        sampled = height(current);
+    }
+
+    const std::array<float, 2> previous{
+        current[0] + stepDelta[0], current[1] + stepDelta[1]};
+    const auto afterDepth = sampled - currentDepth;
+    const auto beforeDepth = height(previous) - currentDepth + layerDepth;
+    const auto span = beforeDepth - afterDepth;
+    const auto weight = std::abs(span) > 1.0e-6f
+        ? std::clamp(beforeDepth / span, 0.0f, 1.0f) : 0.0f;
+    const std::array<float, 2> marched{
+        current[0] + (previous[0] - current[0]) * weight,
+        current[1] + (previous[1] - current[1]) * weight};
+    return {
+        parallax[2] != 0.0f ? marched[0] / parallax[2]
+                                   : texCoord[0],
+        parallax[3] != 0.0f ? marched[1] / parallax[3]
+                                   : texCoord[1]};
+}
 // Model-space normals must never pass through the tangent-normal path: the
 // two decodes read a different number of channels *and* land in different
 // spaces. A model-space texel is already absolute; a tangent-space texel
@@ -1381,16 +1518,58 @@ ScenePacketError RenderReferenceGBuffer(
                         // A null texture means every surface samples opaque
                         // white, which is what makes the alpha-unaware
                         // overload a pure special case of this one.
+                        // Before the base colour is sampled, because a height
+                        // march decides which texel that sample reads. The
+                        // family names the height map and the normals give
+                        // the march its surface frame, so both are resolved
+                        // first and reused below rather than recomputed.
+                        const auto family = inputs.families != nullptr
+                            ? material::ResolveFamilyRecord(
+                                *inputs.families, instance.objectId)
+                            : material::ResolveFamilyRecord(
+                                kEmptyFamilies, instance.objectId);
+                        const auto surfaceNormals = ComputeReferenceNormals(
+                            vertexA, vertexB, vertexC, weightA, weightB,
+                            weightC, instance, object, faceSign);
+                        auto shadedU = weightA * vertexA.texCoord[0] +
+                            weightB * vertexB.texCoord[0] +
+                            weightC * vertexC.texCoord[0];
+                        auto shadedV = weightA * vertexA.texCoord[1] +
+                            weightB * vertexB.texCoord[1] +
+                            weightC * vertexC.texCoord[1];
+                        if (inputs.heightMap != nullptr &&
+                            (family.featureFlags &
+                                material::GpuFeatureParallaxOcclusion) != 0) {
+                            // The direction back to the camera at this pixel,
+                            // which is what the march travels along. The
+                            // camera sits at the origin of this space, so the
+                            // surface point negated is the direction to it.
+                            std::array<float, 3> toViewer{0.0f, 0.0f, 1.0f};
+                            if (inputs.vertexPositions.size() > indexC) {
+                                for (std::size_t axis = 0; axis < 3; ++axis) {
+                                    toViewer[axis] = -(
+                                        weightA *
+                                            inputs.vertexPositions[indexA][axis] +
+                                        weightB *
+                                            inputs.vertexPositions[indexB][axis] +
+                                        weightC *
+                                            inputs.vertexPositions[indexC][axis]);
+                                }
+                                static_cast<void>(
+                                    NormalizeReferenceNormal(toViewer));
+                            }
+                            const auto marched = ReferenceParallaxOffset(
+                                family.parallax, family.wetnessHigh[2],
+                                family.wetnessHigh[3], *inputs.heightMap,
+                                {shadedU, shadedV},
+                                surfaceNormals.geometric, toViewer);
+                            shadedU = marched[0];
+                            shadedV = marched[1];
+                        }
                         float sampledColor[4]{1.0f, 1.0f, 1.0f, 1.0f};
                         if (baseColor != nullptr) {
-                            const auto u =
-                                weightA * vertexA.texCoord[0] +
-                                weightB * vertexB.texCoord[0] +
-                                weightC * vertexC.texCoord[0];
-                            const auto v =
-                                weightA * vertexA.texCoord[1] +
-                                weightB * vertexB.texCoord[1] +
-                                weightC * vertexC.texCoord[1];
+                            const auto u = shadedU;
+                            const auto v = shadedV;
                             texture::SampledColor sampled{};
                             if (texture::SampleTexture2D(*baseColor, u, v,
                                     0.0f, sampled) ==
@@ -1411,15 +1590,6 @@ ScenePacketError RenderReferenceGBuffer(
                         if (!covered.covered) {
                             continue;
                         }
-                        // The family record drives every specialization the
-                        // shader applies, and it is resolved through the same
-                        // rule the backend uploads, so the two cannot differ
-                        // by interpretation.
-                        const auto family = inputs.families != nullptr
-                            ? material::ResolveFamilyRecord(
-                                *inputs.families, instance.objectId)
-                            : material::ResolveFamilyRecord(
-                                kEmptyFamilies, instance.objectId);
                         float shaded[3]{};
                         for (std::size_t channel = 0; channel < 3; ++channel) {
                             const auto interpolated =
@@ -1443,71 +1613,13 @@ ScenePacketError RenderReferenceGBuffer(
                         // A back face of a two-sided surface is shaded from
                         // the side the viewer is on, so both normals flip
                         // together and stay in the same hemisphere.
-                        std::array<float, 3> geometric{};
-                        std::array<float, 3> shading{};
-                        // Interpolated across the triangle, exactly as the
-                        // vertex stage hands it to the fragment stage. Taking
-                        // the object's own axis instead shades every surface
-                        // of an object as one flat plane, and the oracle would
-                        // then disagree with the backend on every curved
-                        // surface -- a difference that looks like a backend
-                        // fault rather than like two different normals.
-                        const std::array<float, 3> localNormal{
-                            weightA * vertexA.normal[0] +
-                                weightB * vertexB.normal[0] +
-                                weightC * vertexC.normal[0],
-                            weightA * vertexA.normal[1] +
-                                weightB * vertexB.normal[1] +
-                                weightC * vertexC.normal[1],
-                            weightA * vertexA.normal[2] +
-                                weightB * vertexB.normal[2] +
-                                weightC * vertexC.normal[2]};
-                        // Rotated by the instance's upper 3x3, because the
-                        // vertex normal is in the same local space the vertex
-                        // position is, and the shader rotates it there too.
-                        // Interpolating and then forgetting to rotate leaves
-                        // every rotated object lit as though it had never
-                        // turned, which is a difference the oracle would
-                        // report against the backend rather than against
-                        // itself.
-                        std::array<float, 3> interpolated{};
-                        for (std::size_t row = 0; row < 3; ++row) {
-                            interpolated[row] =
-                                instance.model[row * 4 + 0] * localNormal[0] +
-                                instance.model[row * 4 + 1] * localNormal[1] +
-                                instance.model[row * 4 + 2] * localNormal[2];
-                        }
-                        const auto interpolatedLength = std::sqrt(
-                            interpolated[0] * interpolated[0] +
-                            interpolated[1] * interpolated[1] +
-                            interpolated[2] * interpolated[2]);
-                        // The same threshold the shader applies, so a mesh
-                        // without usable normals falls back on both sides at
-                        // the same moment rather than at two different ones.
-                        const auto useVertexNormal = interpolatedLength > 1.0e-4f;
-                        for (std::size_t axis = 0; axis < 3; ++axis) {
-                            geometric[axis] = useVertexNormal
-                                ? interpolated[axis] / interpolatedLength *
-                                    faceSign
-                                : object.geometricNormal[axis] * faceSign;
-                            shading[axis] = useVertexNormal
-                                ? interpolated[axis] / interpolatedLength *
-                                    faceSign
-                                : object.shadingNormal[axis] * faceSign;
-                        }
-                        static_cast<void>(
-                            NormalizeReferenceNormal(geometric));
+                        auto geometric = surfaceNormals.geometric;
+                        auto shading = surfaceNormals.shading;
                         if ((family.featureFlags &
                                 material::GpuFeatureNormalMap) != 0 &&
                             inputs.normalMap != nullptr) {
-                            const auto u =
-                                weightA * vertexA.texCoord[0] +
-                                weightB * vertexB.texCoord[0] +
-                                weightC * vertexC.texCoord[0];
-                            const auto v =
-                                weightA * vertexA.texCoord[1] +
-                                weightB * vertexB.texCoord[1] +
-                                weightC * vertexC.texCoord[1];
+                            const auto u = shadedU;
+                            const auto v = shadedV;
                             texture::SampledColor normalSample{};
                             if (texture::SampleTexture2D(*inputs.normalMap,
                                     u, v, 0.0f, normalSample) ==

@@ -148,6 +148,11 @@ struct FamilyRenderOptions
     // Blended draws composited after the opaque pass, in the contract's own
     // sorted order.
     bool transparency{};
+    // Phase 16: makes the first object march a height field, so the parallax
+    // occlusion path is exercised rather than merely compiled. Its own
+    // option because it changes what every texture sample on that object
+    // reads, and the fixtures before it are entitled to their own values.
+    bool parallax{};
 };
 
 struct TerrainRenderOptions
@@ -540,6 +545,52 @@ texture::CapturedTexture BuildQuadrantTexture(
         for (std::size_t channel = 0; channel < 4; ++channel) {
             level.bytes[texel * 4 + channel] =
                 static_cast<std::byte>(texels[texel][channel]);
+        }
+    }
+    fixture.subresources.push_back(std::move(level));
+    return fixture;
+}
+
+// A height field with gradation rather than a step. A two-texel field is
+// enough to show that a march happens at all, and not enough to show whether
+// it marched the right distance: with two values the ray either stops at once
+// or runs to the end, and every step count lands on the same texel. A ramp
+// makes the distance observable, which is what a mutation of the step range
+// has to move.
+texture::CapturedTexture BuildRampTexture(
+    const std::uint64_t resourceId,
+    const std::uint32_t extent)
+{
+    texture::CapturedTexture fixture{};
+    fixture.resourceId = resourceId;
+    fixture.generation = 1;
+    fixture.width = extent;
+    fixture.height = extent;
+    fixture.resourceFormat = texture::TextureFormat::R8G8B8A8Typeless;
+    fixture.viewFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    fixture.sampler.minFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.magFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.mipFilter = texture::TextureFilter::Nearest;
+    fixture.sampler.maxLod = 0.0f;
+    texture::TextureSubresource level{};
+    level.width = extent;
+    level.height = extent;
+    level.rowPitch = extent * 4;
+    level.slicePitch = level.rowPitch * extent;
+    level.bytes.resize(static_cast<std::size_t>(level.slicePitch));
+    for (std::uint32_t y = 0; y < extent; ++y) {
+        for (std::uint32_t x = 0; x < extent; ++x) {
+            // Diagonal, so neither axis of the march can be ignored: a
+            // sweep that dropped one of them would still climb a ramp that
+            // varied along the other.
+            const auto value = static_cast<std::uint8_t>(
+                (x + y) * 255u / std::max(1u, (extent - 1u) * 2u));
+            const auto texel =
+                (static_cast<std::size_t>(y) * extent + x) * 4;
+            level.bytes[texel + 0] = static_cast<std::byte>(value);
+            level.bytes[texel + 1] = static_cast<std::byte>(value);
+            level.bytes[texel + 2] = static_cast<std::byte>(value);
+            level.bytes[texel + 3] = static_cast<std::byte>(255);
         }
     }
     fixture.subresources.push_back(std::move(level));
@@ -1928,9 +1979,21 @@ bool BuildFixtureLights(
 
 bool BuildFamilySceneObjects(
     scene::ScenePacket& scene,
-    material::FamilyPacket& families)
+    material::FamilyPacket& families,
+    // When set, object 1 declares parallax occlusion and binds the height
+    // slot, so the march runs on a real surface rather than being compiled
+    // and never entered.
+    const bool parallax = false)
 {
     if (!BuildSceneObjects(scene)) return false;
+    // Turned away from the camera when it marches. A height field only
+    // displaces along the view direction projected into the surface, so a
+    // surface seen face-on sweeps nowhere and the march is a no-op however
+    // correct it is -- which is what the first version of this fixture
+    // measured, and it passed every mutation.
+    if (parallax) {
+        SetSceneModel(scene.objects[1], 1.9f, 0.9f, {-0.70f, 0.10f, 4.0f});
+    }
     families = {};
     families.header.frameId = scene.header.frameId;
     families.header.viewId = scene.header.viewId;
@@ -1977,6 +2040,23 @@ bool BuildFamilySceneObjects(
         capture.slots[7].resourceId = 0x8000'0000'0000'1603ull;
         capture.slots[7].generation = 1;
         capture.slots[7].authored = true;
+        // The height field, named by the slot the engine reserves for it.
+        // Declaring the role is what makes the backend resolve a library
+        // entry for it and the reference read the same one.
+        if (family == material::MaterialFamily::ParallaxOcclusion) {
+            capture.slots[3].resourceId = 0x8000'0000'0000'1604ull;
+            capture.slots[3].generation = 1;
+            capture.slots[3].authored = true;
+            // A scale of zero marches nowhere, which would compile the path
+            // and never displace a texel. The step range is deliberately not
+            // the default, so a shader reading the wrong lanes for it lands
+            // on 4 and 16 and disagrees.
+            capture.parallaxScale = 0.08f;
+            capture.parallaxBias = 0.0f;
+            capture.parallaxUvScale = {1.0f, 1.0f};
+            capture.parallaxMinSteps = 8;
+            capture.parallaxMaxSteps = 24;
+        }
         material::FamilyDescriptor descriptor;
         if (material::TranslateMaterialFamily(capture, descriptor) !=
             material::FamilyError::None) {
@@ -1994,6 +2074,13 @@ bool BuildFamilySceneObjects(
                 material::PropertyFlag::AnisotropicLighting |
                 material::PropertyFlag::ModelSpaceNormals,
             {0.35f, 0.85f, 0.55f}, {0.0f, 0.0f, 0.0f}, 1.0f)) {
+        return false;
+    }
+    // Object 1 marches a height field when the fixture asks for one. Left
+    // undescribed otherwise, exactly as before, so every earlier fixture
+    // keeps the record set its artifacts were recorded from.
+    if (parallax && !describe(1, material::MaterialFamily::ParallaxOcclusion,
+            0, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, 1.0f)) {
         return false;
     }
     // Object 2: an ordinary surface that declares its own emission and reads
@@ -4844,6 +4931,9 @@ bool ParseFamilyRenderOptions(
             options.lightOutput = argv[++index];
         } else if (argument == "--lit") {
             options.lit = true;
+        } else if (argument == "--parallax") {
+            options.lit = true;
+            options.parallax = true;
         } else if (argument == "--shadows") {
             options.lit = true;
             options.shadows = true;
@@ -5802,8 +5892,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         std::cerr << "family-replay: raster fixture failed\n";
         return 5;
     }
-    if (!BuildFamilySceneObjects(scenePacket, familyPacket)) {
-        std::cerr << "family-replay: family fixture failed\n";
+    if (!BuildFamilySceneObjects(scenePacket, familyPacket, options.parallax)) {
+        std::cerr << "family-replay: family fixture failed" << (char)10;
         return 5;
     }
     lighting::LightPacket lightPacket;
@@ -6058,10 +6148,18 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
     raster::DecodedPacket projected;
     std::vector<std::array<float, 3>> vertexPositions;
     std::vector<float> inverseW;
+    // The height field object 1 marches when the fixture asks for one.
+    const auto heightTexture =
+        BuildRampTexture(0x8000'0000'0000'1604ull, 16);
     // The same textures the reference reads, encoded for the device so both
-    // sides resolve a material's texture from the same library.
+    // sides resolve a material's texture from the same library. The height
+    // field is appended rather than replacing a slot, because the material
+    // bundle carries exactly three and the library is not the bundle.
+    std::vector<texture::CapturedTexture> familyLibrary{
+        bundle.textures.begin(), bundle.textures.end()};
+    familyLibrary.push_back(heightTexture);
     std::vector<std::byte> familyLibraryBytes;
-    if (texture::EncodeTextureLibrary(bundle.textures, familyLibraryBytes) !=
+    if (texture::EncodeTextureLibrary(familyLibrary, familyLibraryBytes) !=
         texture::TexturePacketError::None) {
         std::cerr << "family-replay: texture library encode failed" << (char)10;
         return 5;
@@ -6072,6 +6170,9 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
     // The third slot, which a glow-mapped material reads as its emission
     // mask. The device binds the same texture there.
     inputs.glowMap = &bundle.textures[2];
+    // Read only by a material that declares the height role, so a fixture
+    // without one is unaffected by its presence.
+    inputs.heightMap = &heightTexture;
 
     inputs.families = &familyPacket;
     if (options.lit) {

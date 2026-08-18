@@ -63,7 +63,25 @@ void main()
     GpuFamilyRecordV1 familyRecord =
         sceneFamilies.records[sceneObjectIndex];
 
-    vec4 sampled = textureLod(baseTexture, vertexTexCoord, 0.0);
+    // The coordinate every later sample reads, moved first if this material
+    // marches a height field. Sampling the base texture at the flat
+    // coordinate and the normal at the marched one would light a surface that
+    // is not the one being shown.
+    //
+    // The height map arrives through the frame's texture library, indexed by
+    // the family record, because the four sampled slots are all spoken for --
+    // the fourth is the terrain layer array -- and a fifth binding for one
+    // feature is worse than an index into a table that already exists.
+    vec2 shadedTexCoord = vertexTexCoord;
+    uint heightIndex = uint(max(familyRecord.subsurface.w, 0.0));
+    if (heightIndex != 0u &&
+        heightIndex - 1u < kSceneMaterialTextureCapacity) {
+        shadedTexCoord = vfParallaxOffset(familyRecord,
+            sceneMaterialTextures[heightIndex - 1u], vertexTexCoord,
+            normalize(vertexNormal), normalize(-vertexCameraRelative));
+    }
+
+    vec4 sampled = textureLod(baseTexture, shadedTexCoord, 0.0);
     float surfaceAlpha = material.baseColor.a * sampled.a *
         instanceRecord.parameters.a;
     VfCoverage coverage = vfEvaluateCoverage(
@@ -121,7 +139,7 @@ void main()
     // identical to the Phase 11 mirror.
     vec3 shading = objectRecord.shadingNormal.xyz * faceSign;
     if (vfHasFeature(familyRecord, kVfFeatureNormalMap)) {
-        vec4 normalSample = textureLod(normalTexture, vertexTexCoord, 0.0);
+        vec4 normalSample = textureLod(normalTexture, shadedTexCoord, 0.0);
         vec3 decoded = vfDecodeNormal(
             familyRecord, normalSample, geometric, faceSign);
         float decodedLength2 = dot(decoded, decoded);
@@ -144,7 +162,7 @@ void main()
     // its declared colour unmasked and the map was carried to the device and
     // never read.
     vec3 emission = vfEmission(familyRecord,
-        texture(materialSlotTwo, vertexTexCoord).rgb);
+        texture(materialSlotTwo, shadedTexCoord).rgb);
     // The mirrored opaque scene receives captured direct and ambient light,
     // then fog, in linear HDR. Emission is added after shading because it is
     // radiance the surface emits rather than reflects.
