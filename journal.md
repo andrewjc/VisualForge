@@ -4498,3 +4498,58 @@ took a hundred and fourteen textures out of every frame. The raster packet is
 encoded from a cache on the host and is byte-identical across most frames --
 the encode cache hits 96% of the time -- so the same declaration would let the
 backend keep the decoded packet instead of rebuilding it from 66 MB.
+
+## The packet generation: 95 ms to 62 ms
+
+The 34 ms the backend spent decoding packets every frame had an answer already
+proven in this codebase. The texture library carries a generation: the host
+says "this is the library you already hold" and the backend skips the decode
+and the hash entirely. The raster packet is encoded from a cache that hits 96%
+of the time, so on most frames it hands over bytes it has already handed over.
+
+`RasterFrameRequestV1::packetGeneration` now carries the same declaration, and
+the host declares the signature its encode cache already keys on -- that
+signature answers exactly the right question, "are these the bytes you were
+given last time".
+
+The header is decoded either way. It carries the frame index, the extent and
+the viewport, which change every frame, and `DecodePacketHeader` validates it
+exactly as a full decode does: magic, version, header size, total size and
+extent. Believing a caller's generation is not the same as believing whatever
+bytes arrive with it, and a caller that declares a stale generation over a
+corrupt packet still gets the packet refused.
+
+Measured on the same cell:
+
+| | before | after |
+| --- | --- | --- |
+| `prepare-us` | 34,718 | **5,997** |
+| `record-us` | 55,293 | 25,766 |
+| `gpu-wait-us` | 45,850 | 16,225 |
+| mirror frame | ~95,000 | **62,343** |
+| frames in the settle window | ~1,600 | 2,400 |
+
+**A third of the frame, gone.** `gpu-wait` fell with it, which is worth
+naming: the two are not independent when the host is the thing feeding the
+queue.
+
+The retained packet is safe to keep because every consumer takes it by const
+reference -- `BuildUploadLayout`, `UploadPacket` and `RecordAndSubmit` all
+declare `const raster::DecodedPacket&`, and nothing writes to the geometry
+sections. That was checked rather than assumed, because a cache over something
+a consumer mutates is a defect that only appears on the second frame.
+
+### The running attribution
+
+A mirrored frame was ~95 ms and is now ~62 ms. Of what is left, the
+acceleration rebuild is about 17 ms and the three ray-traced terms together are
+about 2%. Overdraw is 0.88, so the forward scene pass shades less than one
+fragment per pixel and is not the remainder.
+
+Four performance hypotheses have been wrong this session -- the diffuse bounce,
+the build quality preset, the missing depth prepass, and the earlier reading of
+the acceleration timer -- and two of them would have produced large, confident,
+useless changes. Every one was settled by a measurement that cost a query pool
+or a frame flag. The two that were right, the packet generation and the
+acceleration rebuild, were both found by ablating a term and differencing
+against its neighbours rather than by reasoning about what ought to be slow.
