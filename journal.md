@@ -4365,3 +4365,85 @@ answer that survived being written down. The lesson is not about indirect
 light: a mean over a window that spans a streaming event, or two accumulators
 that do not start together, will produce a number with a plausible magnitude
 and an arbitrary sign.
+
+## Where the mirrored frame actually goes, and what the acceleration structure costs
+
+With the mirror finally presenting world frames, the ~99 ms frame could be
+taken apart. Five states, each ablated for a 120-frame window and compared
+against the all-on windows either side of it, settled frames only:
+
+| window | mean |
+| --- | --- |
+| everything on | 98,987 us |
+| no diffuse bounce | 97,267 us |
+| no specular bounce | 98,911 us |
+| no shadow ray per light | 97,544 us |
+| **no acceleration rebuild** | **80,103 us** |
+
+**The three ray-traced terms together are worth about 2%. The structure they
+trace against costs about 19%.** The renderer was spending a fifth of every
+frame building something it then barely used.
+
+Two switches had to be written to get there. `EnvironmentIndirectDisabled`
+already existed and its own comment argued that every ray-traced term needs
+one; the specular bounce and the shadow ray did not have one, so
+`EnvironmentReflectionDisabled` and `EnvironmentShadowsDisabled` now exist,
+each mirrored on the CPU so the oracle and the device stay in step, each
+mutation-verified. Shadows disable to *fully lit* rather than fully shadowed:
+an isolation has to remove the term, and shadowing everything removes the
+light with it.
+
+### A correction: the earlier dismissal used the wrong timer
+
+This journal previously closed phase 18's rebuild-every-frame gap on
+`acceleration-us=109`, concluding the whole build cost a tenth of a
+millisecond. That number is the host time spent *recording* the build command.
+The build runs on the queue afterwards and lands in `gpu-wait`. Reading one as
+the other is what made a fifth of the frame invisible.
+
+### Two attempted fixes, one negative and one partial
+
+**`PREFER_FAST_BUILD` instead of `PREFER_FAST_TRACE`** looked obviously right
+for a structure rebuilt every frame and traced for 2% of it. Measured: 100,342
+us against 98,987. No effect, reverted. The cost is in rebuilding 1.19 M
+triangles, not in the quality preset.
+
+**Anchoring the structure to a world origin** rather than to the camera is
+correct and is now in: the packet's transforms are camera relative, so a
+structure built straight from them moves with the player and must be rebuilt
+however static the scene is. Each geometry's transform now carries
+`camera - anchor` and the single top-level instance carries `anchor - camera`,
+which cancel exactly, leaving the structure's contents a function of the scene
+rather than of where the player is standing. The anchor follows in half-cell
+steps so the residual never grows large enough to lose float precision.
+
+Building on it needed one more fix. The anchor-relative translation is
+`(W - C) + (C - A)`, mathematically independent of the camera and not
+independent of it in float, so hashing the transforms exactly made every frame
+a rebuild. Translations are now quantised to a sixty-fourth of a unit -- well
+under a millimetre at Fallout's scale and far above the jitter.
+
+**It skips 81 rebuilds in 1,200, and that is the honest result: 7%.**
+
+```text
+acceleration-reuse builds=1119 skips=81 reanchors=1 plans=1137
+```
+
+`plans` is the answer: it oscillates between 1,135 and 1,137. The engine's
+drawn instance set changes from frame to frame -- LOD and culling churn -- and
+one bottom level holding every drawn geometry is invalidated by any change to
+that set, however static the meshes themselves are. The mesh-churn monitor
+reporting 940 of 940 unchanged is about *meshes*; this structure is keyed on
+*drawn instances*.
+
+So the anchoring is a prerequisite that is now in place and buys about 1% on
+its own. Real reuse needs what the phase 18 doc already named: one bottom level
+per mesh, with a top-level instance per object carrying its transform, so a
+changing set of instances rebuilds only the cheap half. The doc said that
+needed stable geometry identity across frames; the arena and the identity
+ordering provide it now.
+
+What remains unattributed is about 78 ms -- the base raster over 940 draws and
+1.19 M vertices into a five-attachment G-buffer at 720p, which is far more than
+that hardware should need. The ablation probe that separated the ray-traced
+terms is sound and can be pointed at it.

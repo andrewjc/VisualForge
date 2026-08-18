@@ -659,6 +659,15 @@ struct VulkanRasterRenderer::Impl
     Buffer instanceBuffer;
     bool tlasReady{};
     bool accelBuildPending{};
+    // Anchored to a world origin rather than to the camera, so the structure.s
+    // contents depend on the scene and not on where the player is standing.
+    std::array<double, 3> accelAnchor{};
+    bool accelAnchorValid{};
+    std::uint64_t accelBlasSignature{};
+    bool accelBlasBuildPending{};
+    std::uint64_t accelBlasBuilds{};
+    std::uint64_t accelBlasSkips{};
+    std::uint64_t accelBlasReanchors{};
     // One geometry per drawn instance, each carrying that instance's model
     // rows as a build-time transform. The packet's vertices are local space,
     // so a single identity geometry would trace a scene whose objects all sit
@@ -3062,11 +3071,111 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
             return fail("transform-buffer", created);
         }
     }
+    // The structure is anchored to a fixed world origin, not to the camera.
+    //
+    // The packet's transforms are camera relative, so a structure built
+    // straight from them moves with the player and has to be rebuilt every
+    // frame however static the scene is. Measured on a mirrored Sanctuary
+    // frame: declining the rebuild took 99 ms to 80 ms, while the three terms
+    // the structure exists to serve were each within 2% of all-on -- a fifth
+    // of every frame spent building something that was barely traced.
+    //
+    // Anchoring costs one translation per geometry here and one on the top
+    // level instance, which cancel exactly, and it makes the structure's
+    // contents depend on the scene rather than on where the player is
+    // standing. The anchor follows the camera in half-cell steps so the
+    // residual never grows large enough to lose float precision.
+    constexpr double kAnchorStride = 2048.0;
+    const std::array<double, 3> cameraOrigin{
+        viewRecord.cameraRelativeOrigin[0],
+        viewRecord.cameraRelativeOrigin[1],
+        viewRecord.cameraRelativeOrigin[2]};
+    auto reanchored = !accelAnchorValid;
+    if (accelAnchorValid) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            if (std::abs(cameraOrigin[axis] - accelAnchor[axis]) >
+                kAnchorStride) {
+                reanchored = true;
+            }
+        }
+    }
+    if (reanchored) {
+        accelAnchor = cameraOrigin;
+        accelAnchorValid = true;
+    }
+    // Camera relative plus this reaches anchor relative. Small by
+    // construction: the anchor is never more than a half cell away.
+    std::array<float, 3> anchorOffset{};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        anchorOffset[axis] =
+            static_cast<float>(cameraOrigin[axis] - accelAnchor[axis]);
+    }
+    std::uint64_t blasSignature = 0xCBF2'9CE4'8422'2325ull;
+    const auto fold = [&blasSignature](const std::uint64_t value) {
+        blasSignature = (blasSignature ^ value) * 0x0000'0100'0000'01B3ull;
+    };
+    fold(plans.size());
     for (std::size_t index = 0; index < plans.size(); ++index) {
+        auto transform = plans[index].transform;
+        // Rows 0 to 2 of a row-major 4x4 are a VkTransformMatrixKHR, so the
+        // translation is the fourth column of each.
+        transform[3] += anchorOffset[0];
+        transform[7] += anchorOffset[1];
+        transform[11] += anchorOffset[2];
         std::memcpy(
             static_cast<std::byte*>(accelTransforms.mapped) +
                 index * sizeof(VkTransformMatrixKHR),
-            plans[index].transform.data(), sizeof(VkTransformMatrixKHR));
+            transform.data(), sizeof(VkTransformMatrixKHR));
+        // Rotation and scale exactly; translation quantised.
+        //
+        // An anchor-relative translation is (W - C) + (C - A), which is
+        // mathematically independent of the camera and is not independent of
+        // it in float: the packet narrows against C every frame, so the low
+        // bits jitter as the player walks even though the value does not
+        // move. Hashing them exactly made every frame a rebuild and the
+        // anchoring bought nothing. A sixty-fourth of a unit is well under a
+        // millimetre at Fallout's scale and far above the jitter.
+        for (std::size_t element = 0; element < transform.size(); ++element) {
+            const auto translation = element == 3 || element == 7 ||
+                element == 11;
+            if (translation) {
+                fold(static_cast<std::uint64_t>(static_cast<std::int64_t>(
+                    std::llround(transform[element] * 64.0f))));
+                continue;
+            }
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &transform[element], sizeof(bits));
+            fold(bits);
+        }
+        fold(plans[index].firstIndex);
+        fold(plans[index].indexCount);
+        fold(static_cast<std::uint32_t>(plans[index].vertexOffset));
+    }
+    // Rebuilt only when what it describes changed. A settled cell reports
+    // around 940 of 940 meshes unchanged, and with the anchor holding still
+    // their anchor-relative placements are unchanged too.
+    accelBlasBuildPending = reanchored || blasSignature != accelBlasSignature;
+    accelBlasSignature = blasSignature;
+    // Whether the skip actually fires. Anchoring is only worth anything if
+    // the signature holds still, and a signature over floats that jitter
+    // looks identical from outside to one that does not.
+    if (accelBlasBuildPending) {
+        ++accelBlasBuilds;
+        if (reanchored) ++accelBlasReanchors;
+    } else {
+        ++accelBlasSkips;
+    }
+    if (((accelBlasBuilds + accelBlasSkips) % 120) == 0 &&
+        callbacks.log != nullptr) {
+        std::string message{"acceleration-reuse builds="};
+        message += std::to_string(accelBlasBuilds);
+        message += " skips=";
+        message += std::to_string(accelBlasSkips);
+        message += " reanchors=";
+        message += std::to_string(accelBlasReanchors);
+        message += " plans=";
+        message += std::to_string(plans.size());
+        callbacks.log(callbacks.userData, 1u, message.c_str());
     }
 
     // A ray query recovers which geometry it hit but has no vertex attributes
@@ -3230,6 +3339,13 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
     tlasInstance.transform.matrix[0][0] = 1.0f;
     tlasInstance.transform.matrix[1][1] = 1.0f;
     tlasInstance.transform.matrix[2][2] = 1.0f;
+    // Anchor relative back to camera relative, exactly undoing the offset the
+    // bottom level baked in. The rays are cast in camera-relative space and
+    // do not change; this instance is one record and is rebuilt every frame,
+    // which is what lets the expensive half hold still.
+    tlasInstance.transform.matrix[0][3] = -anchorOffset[0];
+    tlasInstance.transform.matrix[1][3] = -anchorOffset[1];
+    tlasInstance.transform.matrix[2][3] = -anchorOffset[2];
     tlasInstance.mask = accel::kInstanceMaskAll;
     // An occluder shadows from either face, so culling is disabled rather
     // than letting a back-facing triangle stop blocking light.
@@ -4595,10 +4711,17 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
         // The bottom level first, then an explicit dependency, then the top
         // level that reads it. Precise stages rather than an all-commands
         // barrier, which the plan calls out as bring-up debt to avoid.
-        const VkAccelerationStructureBuildRangeInfoKHR* blasRanges =
-            pendingBlasRanges.data();
-        cmdBuildAccelerationStructures(command, 1, &pendingBlasBuild,
-            &blasRanges);
+        // The bottom level only when what it describes changed. It is
+        // anchored to a world origin, so a settled cell leaves every
+        // anchor-relative placement exactly where it was and there is nothing
+        // to rebuild; the top level below is one instance and is rebuilt
+        // every frame to carry the camera.
+        if (accelBlasBuildPending) {
+            const VkAccelerationStructureBuildRangeInfoKHR* blasRanges =
+                pendingBlasRanges.data();
+            cmdBuildAccelerationStructures(command, 1, &pendingBlasBuild,
+                &blasRanges);
+        }
         VkMemoryBarrier2 blasBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         blasBarrier.srcStageMask =
             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
