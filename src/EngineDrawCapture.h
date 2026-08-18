@@ -107,6 +107,38 @@ inline constexpr std::size_t kDrawArenaCapacity = 8192;
 // scene that is missing objects.
 [[nodiscard]] std::uint32_t LayoutOverflowCount() noexcept;
 
+// One recorded input-layout declaration, copied out whole.
+//
+// `FindInputLayout` answers "how do I decode this stream", and it answers it
+// only for the semantics this build already knows. The semantics it does not
+// know are silently absent from its answer, which is safe but invisible --
+// landscape blend weights are declared as TEXCOORD registers past the two the
+// mesh decoder maps, so a landscape stream and an untextured mesh look
+// identical through that door. This is the other door: the engine's own
+// declaration, verbatim, so a semantic that is not decoded can still be seen.
+struct RecordedLayoutElement
+{
+    char name[24]{};
+    std::uint32_t semanticIndex{};
+    std::uint32_t format{};
+    std::uint32_t inputSlot{};
+    std::uint32_t alignedByteOffset{};
+};
+
+constexpr std::size_t kRecordedLayoutElementCapacity = 16;
+
+struct RecordedLayoutDescription
+{
+    std::uint64_t handle{};
+    std::uint32_t elementCount{};
+    RecordedLayoutElement elements[kRecordedLayoutElementCapacity]{};
+};
+
+// Writes up to `capacity` recorded layouts and returns how many were written.
+[[nodiscard]] std::size_t CopyRecordedLayouts(
+    RecordedLayoutDescription* destination,
+    std::size_t capacity) noexcept;
+
 // What the rasterizer-state capture has actually observed. Reported so that a
 // winding taken "from the engine" can be told from one that fell back to a
 // default because nothing was ever captured.

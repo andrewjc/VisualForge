@@ -935,6 +935,84 @@ bool BuildLiveSceneGeometry(
         previous = std::move(current);
     }
 
+    // Which of the engine's declared vertex formats the world geometry is
+    // actually drawn with, and how much geometry each carries.
+    //
+    // The declarations alone do not say which are in use: the engine created
+    // forty-two and the mirror keeps around nine hundred objects, and the one
+    // that draws the ground is a question about the objects, not about the
+    // list. Reported with the triangle load so the format carrying the
+    // landscape -- which is far more geometry per object than a crate is --
+    // can be told from the formats carrying clutter.
+    if (frameId % 120 == 0) {
+        struct FormatUse
+        {
+            std::uint32_t objects{};
+            std::uint64_t indices{};
+            std::uint32_t maxVertexBytes{};
+        };
+        std::map<std::pair<std::uint64_t, std::uint32_t>, FormatUse> used;
+        for (const auto& object : scenePacket.objects) {
+            const auto* const held =
+                engine_mesh_extractor::Find(object.objectId);
+            if (held == nullptr) continue;
+            auto& entry = used[{held->inputLayout, held->vertexStride}];
+            ++entry.objects;
+            entry.indices += held->indices.size();
+            entry.maxVertexBytes = std::max(entry.maxVertexBytes,
+                static_cast<std::uint32_t>(held->vertices.size()));
+        }
+        for (const auto& [key, entry] : used) {
+            log::Write("renderer-format-use: handle=%llu stride=%u "
+                "objects=%u indices=%llu max-vertex-bytes=%u",
+                static_cast<unsigned long long>(key.first), key.second,
+                entry.objects,
+                static_cast<unsigned long long>(entry.indices),
+                entry.maxVertexBytes);
+        }
+    }
+
+
+    // The engine's own vertex declarations, printed as they are created. The
+    // mesh decoder maps the semantics it knows and skips the rest, so a
+    // stream carrying landscape blend weights is indistinguishable from one
+    // carrying none through that path. Landscape geometry is the ground: the
+    // mirror has never sent a terrain packet, and this is how the stream that
+    // would fill one gets identified from the engine rather than guessed at.
+    //
+    // Printed incrementally rather than once. Layouts are created as the game
+    // needs them: a one-shot dump ran on the load screen and reported eleven
+    // of the forty-two an exterior cell ends up declaring, and none of the
+    // eleven was landscape.
+    if (frameId % 120 == 0) {
+        static std::size_t s_layoutsDumped = 0;
+        static std::vector<engine_draw_capture::RecordedLayoutDescription>
+            described(512);
+        const auto count = engine_draw_capture::CopyRecordedLayouts(
+            described.data(), described.size());
+        // Slots are claimed in order, so the first `count` written are the
+        // first `count` recorded and the tail is exactly what is new.
+        for (auto index = s_layoutsDumped; index < count; ++index) {
+            const auto& layout = described[index];
+            for (std::uint32_t element = 0;
+                element < layout.elementCount; ++element) {
+                const auto& entry = layout.elements[element];
+                log::Write("renderer-layout: handle=%llu element=%u "
+                    "name=%s index=%u format=%u slot=%u offset=%u",
+                    static_cast<unsigned long long>(layout.handle),
+                    element, entry.name, entry.semanticIndex,
+                    entry.format, entry.inputSlot,
+                    entry.alignedByteOffset);
+            }
+        }
+        if (count != s_layoutsDumped) {
+            log::Write("renderer-layout-dump: layouts=%zu new=%zu",
+                count, count - s_layoutsDumped);
+            s_layoutsDumped = count;
+        }
+    }
+
+
     if (frameId % 120 == 0) {
         const auto layouts = engine_draw_capture::LayoutCounters();
         log::Write("renderer-meshes: objects=%zu usable=%zu not-extracted=%u "
@@ -995,6 +1073,44 @@ bool BuildLiveSceneGeometry(
             lastOffered = offered;
         }
         return false;
+    }
+
+    // Every input that combines into the final cull direction, in one place.
+    //
+    // Three separate things decide which side of a triangle survives: the
+    // winding the engine declared, whether the model transform mirrors, and
+    // the inversion the backend applies for Vulkan's Y-down framebuffer. Each
+    // was reasoned about separately and each is individually defensible,
+    // which is exactly how a pair of them can cancel and a third can leave
+    // the whole scene inverted. Reported together so the composition can be
+    // read off rather than argued about.
+    if (frameId % 120 == 0) {
+        std::uint32_t engineFrontCcw = 0;
+        for (const auto& mesh : meshes) {
+            if (mesh.frontCounterClockwise) ++engineFrontCcw;
+        }
+        std::uint32_t mirroredModels = 0;
+        std::uint32_t twoSided = 0;
+        std::uint32_t backOnly = 0;
+        for (const auto& entry : scenePacket.visibility) {
+            if (entry.modelDeterminant < 0.0f) ++mirroredModels;
+            if (entry.faceMode == visibility::FaceMode::TwoSided) ++twoSided;
+            if (entry.faceMode == visibility::FaceMode::BackOnly) ++backOnly;
+        }
+        std::uint32_t drawsCcw = 0;
+        for (const auto& draw : rasterPacket.draws) {
+            if (draw.frontFace == raster::FrontFace::CounterClockwise) {
+                ++drawsCcw;
+            }
+        }
+        log::Write("renderer-winding: view-sign=%.3f flips=%u meshes=%zu "
+            "engine-front-ccw=%u visibility=%zu mirrored-models=%u "
+            "two-sided=%u back-only=%u draws=%zu draws-ccw=%u",
+            static_cast<double>(
+                view::ViewOrientationSign(record.viewProjection)),
+            orientationFlips ? 1u : 0u, meshes.size(), engineFrontCcw,
+            scenePacket.visibility.size(), mirroredModels, twoSided, backOnly,
+            rasterPacket.draws.size(), drawsCcw);
     }
 
     // The frame's texture library, and each material's index into it.

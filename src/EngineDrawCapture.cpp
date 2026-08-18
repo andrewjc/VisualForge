@@ -1387,6 +1387,41 @@ std::uint32_t LayoutOverflowCount() noexcept
     return s_layoutOverflow.load(std::memory_order_relaxed);
 }
 
+std::size_t CopyRecordedLayouts(
+    RecordedLayoutDescription* const destination,
+    const std::size_t capacity) noexcept
+{
+    static_assert(kRecordedLayoutElementCapacity == kMaximumLayoutElements,
+        "the published element capacity must match the recorded one");
+    if (destination == nullptr || capacity == 0) return 0;
+    std::size_t written = 0;
+    for (const auto& entry : s_layouts) {
+        if (written == capacity) break;
+        const auto handle = entry.handle.load(std::memory_order_acquire);
+        if (handle == 0) continue;
+        // Same publication order the decoder relies on: a layout is either
+        // complete or not there.
+        if (!entry.ready.load(std::memory_order_acquire)) continue;
+        auto& target = destination[written];
+        target = {};
+        target.handle = static_cast<std::uint64_t>(handle);
+        target.elementCount = entry.elementCount;
+        for (std::uint32_t index = 0; index < entry.elementCount; ++index) {
+            const auto& source = entry.elements[index];
+            auto& element = target.elements[index];
+            const auto length = std::min(source.semanticName.size(),
+                sizeof(element.name) - 1);
+            std::memcpy(element.name, source.semanticName.data(), length);
+            element.semanticIndex = source.semanticIndex;
+            element.format = source.format;
+            element.inputSlot = source.inputSlot;
+            element.alignedByteOffset = source.alignedByteOffset;
+        }
+        ++written;
+    }
+    return written;
+}
+
 std::size_t MissingBaseColorSlots(
     std::uint64_t* const destination,
     const std::size_t capacity,
