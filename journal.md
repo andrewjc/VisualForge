@@ -4217,3 +4217,91 @@ One defect found on the way and worth keeping: `materialBindingFlags` was a
 fixed `std::array<..., 20>` indexed by a binding count that had grown past it,
 which the Debug CRT aborted on. It is now sized from `materialBindings.size()`
 so the two cannot drift again.
+
+## Why the D3D renderer never stopped drawing the world
+
+The mirror had never presented a world frame. Not once, in any run. It
+presented the loading screen and then refused every frame after the cell
+arrived, and because suppression is fail-open -- engine draws are dropped only
+*once the mirror is presenting* -- the engine went on drawing the world for the
+whole session. What looked like the D3D renderer "swapping into" the frame
+buffer was the D3D renderer never having left.
+
+The evidence was in the log the entire time and read as unremarkable:
+
+```text
+renderer-suppression: frames=990 suppressed=47662 forwarded=1001506 presented=no
+renderer-mirror: render failed diagnostic=missing material; frame remains vanilla
+```
+
+`presented=no`, and 4.5% of draws suppressed. The failure line appears once
+because it is re-logged only when the reason changes, which made a permanent
+refusal look like a transient one.
+
+**The cause is two correct decisions that are incompatible.** The raster packet
+is cached across frames on a content key that is deliberately
+*order-independent*: a permutation of the same opaque depth-tested draws is the
+same picture, and an order-sensitive key never matched twice because Fallout 4
+varies draw-submission order between frames -- 50 ms of re-encoding 67 MB that
+had not changed. That reasoning is sound about the picture.
+
+It is wrong about the packet. The scene packet pairs an object to a draw
+*positionally*: the backend resolves `draws[object.drawIndex].materialId` and
+refuses the frame when it disagrees. And the scene packet cannot be cached
+alongside it, because its transforms are camera relative and move every frame.
+So a permuted frame served last frame's draw order against this frame's object
+order, every object resolved somebody else's material, and the frame was
+refused.
+
+Both halves are now fixed, and both are needed:
+
+- `TranslateDrawStream` orders its groups by mesh identity rather than by the
+  order the engine submitted them. Identity is the right key because the
+  arena, the encode cache and the mesh-churn monitor already key on it, so all
+  four agree about what "the same mesh" means.
+- The encode cache key is sequenced rather than XORed. The ordering above is
+  what makes it *hit*; the sequencing is what makes a cache miss the
+  consequence of a real reordering rather than an undetected hazard.
+
+Measured live, over the same cell:
+
+| | before | after |
+| --- | --- | --- |
+| mirror presents | no | **yes** |
+| world draws suppressed | 47,662 of 1,049,168 (4.5%) | 2,145,230 of 4,545,589 (47%) |
+| encode cache hit rate | n/a (frame refused) | 1,546 hits / 61 misses |
+| `present-us` | 0 | 1,182 |
+
+The strict key alone was measured first, deliberately, to separate the two
+effects: it made the mirror present and dropped the cache to 544 hits against
+702 misses with a 117 ms frame. Adding the deterministic order recovered the
+cache to 96% and brought the frame to 92 ms. Neither number would have been
+attributable if both had landed together.
+
+### What this does not fix
+
+`render-us` is 91 ms of that 92 ms frame, and `gpu-wait` is nearly all of it.
+The mirror now presents about eleven frames a second. That is a GPU cost, not
+a packet cost -- `prepare-us` is 0.27 ms and `upload-us` is 0.07 ms -- and it
+is larger than it was because the ray-traced reflection and indirect terms now
+carry a real albedo instead of shading black. It is the next thing to measure
+and it is a different problem from this one.
+
+Suppression reaches 47%, not 100%, because the mirror still declines some
+frames (`live-scene-unavailable`) and only suppresses on frames it presents.
+
+### Two test defects this surfaced
+
+`PLS_translation_turns_repeated_meshes_into_instances` and
+`PLS_assembly_draws_only_the_geometry_it_actually_has` both encoded the
+engine's submission order as the packet's order -- one by asserting instance
+positions, the other by choosing which mesh to supply with
+`packet.objects[0].objectId`. Both now locate what they mean by its properties:
+the object with more than one placement, and the instances grouped under each
+object. That is what they were always trying to say, and it no longer pins the
+one thing that had to stop depending on the engine.
+
+The sort was reverted once on the mistaken conclusion that it had broken them,
+after a rebuild that had not actually happened. Re-running it against a clean
+tree is what separated "the sort breaks these tests" from "these tests assume
+an order" -- and only one of those is a reason not to sort.
