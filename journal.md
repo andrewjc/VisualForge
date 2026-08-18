@@ -4146,3 +4146,74 @@ Nothing declared them off; the shader traces unconditionally under
 `VF_RAY_QUERY`. A frame that wants no ray-traced terms has no way to say so,
 and that is still true -- it is now recorded rather than compensated for by an
 accident.
+
+## Attributes at a ray hit: built, measured, and held back
+
+The blocker phases 18 and 19 share is that a ray query reports a geometry
+index, a primitive index and a barycentric pair, and nothing else -- no vertex
+attributes. That is why a reflection hit shades from a per-object constant,
+why there is no texture fetch at a hit, and why cutout geometry cannot be
+alpha-tested as an occluder. Solving it once unblocks all three.
+
+It was built and it works:
+
+- A per-geometry table (`scene::GpuGeometryRecordV1`) carrying the object
+  index, the absolute element offsets of the geometry's first index and first
+  vertex, the resolved material texture index, and a flag for 16-bit indices.
+  Absolute offsets, so the shader needs no per-frame base and cannot apply the
+  wrong one.
+- The frame's index and vertex streams bound as storage buffers at 21 and 22,
+  rewritten every frame because the upload buffer is recreated whenever a
+  frame needs more room and a descriptor naming the old one reads freed
+  memory.
+- `vfGeometryIndex`, `vfHitVertexColor` and `vfHitTexCoord` in
+  `scene_layout.glsl`, and the matching barycentric interpolation in
+  `reflect::TraceReflection`, which already computed `u` and `v` and threw
+  them away.
+
+Confirmed correct against the build: `primitiveOffset` is
+`firstIndex * indexSize` and `firstVertex` is `plan.vertexOffset`, so the
+table's offsets and the structure agree by construction rather than by
+coincidence.
+
+**It is stashed rather than landed, and the reason is the measurement.**
+Interpolating the corner colours makes the device and the oracle disagree in a
+way that a flat per-object colour hid completely: any barycentric gives the
+same answer when all three corners are the same colour. The acceleration
+structure transforms its vertices at build time and the oracle transforms its
+own, so the barycentrics at a hit differ slightly, and on the one fixture
+object whose vertex colours vary that difference becomes visible.
+
+| bound | before | with interpolation | limit |
+| --- | --- | --- | --- |
+| shadow-interior mismatches | pass | 93 | 41 |
+| shadow-interior max error | -- | 0.036 | ungated |
+| frame HDR differing pixels | pass | 662 | 491 |
+
+Disabling interpolation on both sides returns every contract to green, which
+is what identifies it as the sole cause rather than a defect in the fetch.
+
+Landing it would mean widening two count bounds at once. One was arguable --
+the indirect gate already explains that a ray-triangle decision at an edge is
+not bit-identical between an oracle and a hardware intersector, and a
+magnitude bound can be added to pin what the count concedes. Two is where the
+contract starts measuring less than it did, and the worst pixel here is off by
+0.6% on a value the frame-wide bound cannot pin at all: `hdr-max-error` is
+1.28 and ungated for a lit frame, which is a pre-existing weakness this
+exercise surfaced rather than caused.
+
+So the useful output is not the feature, it is the constraint: **any per-hit
+attribute sampled by two different intersectors cannot be compared pixel for
+pixel against the current bounds.** Texture fetch at a hit has exactly this
+shape and will hit exactly this wall. What it needs first is a comparison that
+does not require the two intersectors to agree on which side of an edge a ray
+passed -- an interior mask that excludes pixels whose hit geometry differs
+between the two, the way the silhouette comparison already excludes edges.
+
+That is the next step, and it is now specified rather than guessed at. The
+work is recoverable from `git stash` under `ray-hit-attribute-fetch`.
+
+One defect found on the way and worth keeping: `materialBindingFlags` was a
+fixed `std::array<..., 20>` indexed by a binding count that had grown past it,
+which the Debug CRT aborted on. It is now sized from `materialBindings.size()`
+so the two cannot drift again.
