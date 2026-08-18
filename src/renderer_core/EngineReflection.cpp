@@ -390,6 +390,8 @@ ReflectionHit TraceReflection(
         nearest.normal =
             OrientHitNormal(triangle.normal, direction, triangle.twoSided);
         nearest.albedo = triangle.albedo;
+        nearest.objectIndex = triangle.objectIndex;
+        nearest.primitiveIndex = triangle.primitiveIndex;
     }
     return nearest;
 }
@@ -472,6 +474,8 @@ ReflectionResult EvaluateReflection(
             environment, lights, hit.albedo, hit.position, hit.normal,
             std::span<const float>{shadow.data(), count}));
         result.source = ReflectionSource::Geometry;
+        result.hitObjectIndex = hit.objectIndex;
+        result.hitPrimitiveIndex = hit.primitiveIndex;
         result.hitDistance = hit.distance;
         return result;
     }

@@ -578,3 +578,48 @@ TEST_CASE("P19_reflections_can_be_switched_off_for_a_frame",
     CHECK(dark.radiance[1] == 0.0f);
     CHECK(dark.radiance[2] == 0.0f);
 }
+
+TEST_CASE("P19_a_reflection_reports_which_geometry_it_found",
+    "[phase19][reflection]")
+{
+    // A radiance comparison between an oracle and a hardware intersector
+    // cannot distinguish "the two shaded the same hit differently" from "the
+    // two hit different things". Every per-hit attribute this phase wants --
+    // an interpolated vertex colour, a texture fetch, more than one sample --
+    // makes the second case visible, and each one stalled on the same
+    // question. Reporting what was hit is what lets those pixels be named and
+    // excluded rather than absorbed by a wider bound.
+    reflect::ReflectionTriangle near{};
+    near.a = {-1.0f, -1.0f, 1.0f};
+    near.b = {1.0f, -1.0f, 1.0f};
+    near.c = {0.0f, 2.0f, 1.0f};
+    near.normal = {0.0f, 0.0f, -1.0f};
+    near.twoSided = true;
+    near.objectIndex = 7;
+    auto far = near;
+    far.a[2] = 5.0f;
+    far.b[2] = 5.0f;
+    far.c[2] = 5.0f;
+    far.objectIndex = 9;
+    const std::array<reflect::ReflectionTriangle, 2> triangles{far, near};
+
+    reflect::ReflectionRay ray{};
+    ray.origin = {0.0f, 0.0f, 0.0f};
+    ray.direction = {0.0f, 0.0f, 1.0f};
+    ray.maximumDistance = 100.0f;
+    const auto hit = reflect::TraceReflection(triangles, ray);
+    REQUIRE(hit.hit);
+    // The nearer triangle, and its identity travels with the hit rather than
+    // being recovered from the distance by the caller.
+    CHECK(hit.objectIndex == 7u);
+
+    // A ray that finds nothing reports no geometry, so "found object zero"
+    // and "found nothing" cannot be confused.
+    reflect::ReflectionRay away{};
+    away.origin = {0.0f, 0.0f, 0.0f};
+    away.direction = {0.0f, 0.0f, -1.0f};
+    away.maximumDistance = 100.0f;
+    const auto missed = reflect::TraceReflection(triangles, away);
+    CHECK_FALSE(missed.hit);
+    CHECK(missed.objectIndex == 0u);
+}

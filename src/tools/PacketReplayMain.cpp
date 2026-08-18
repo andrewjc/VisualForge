@@ -1538,6 +1538,15 @@ std::vector<reflect::ReflectionTriangle> BuildReflectionGeometry(
                     (tinted ? record.tintColor[1] : 1.0f),
                 record.baseColor[2] *
                     (tinted ? record.tintColor[2] : 1.0f)};
+            // Which object this triangle belongs to, so a hit can be named.
+            // One-based, because zero is what a ray that found nothing
+            // reports and the two must not be confusable.
+            triangle.objectIndex =
+                static_cast<std::uint32_t>(objectIndex) + 1u;
+            // Which triangle of this draw, numbered exactly as the ray query
+            // numbers a primitive within its geometry: the two must agree or
+            // the comparison is between two different numbering schemes.
+            triangle.primitiveIndex = static_cast<std::uint32_t>(offset / 3);
             // The instance disables triangle culling, so a reflection sees
             // the back of a surface exactly as the ray query does.
             triangle.twoSided = true;
@@ -6770,6 +6779,10 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     // boundary and belongs to one object must agree exactly; the boundary
     // itself is counted and reported rather than silently tolerated.
     std::uint64_t shadowInterior = 0;
+    // Pixels whose reflection ray found different geometry on the two sides.
+    // Reported so the exclusion is visible, and bounded so it cannot grow
+    // into a way of not comparing the picture at all.
+    std::uint64_t divergentHitPixels = 0;
     std::uint64_t shadowInteriorMismatches = 0;
     float maximumShadowInteriorError = 0.0f;
     std::uint32_t worstX = 0;
@@ -6816,6 +6829,30 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
                     }
                 }
                 if (!uniform) continue;
+                // Both sides agreed about which surface this pixel shows.
+                // Now ask whether they agreed about the ray it cast.
+                //
+                // The reflection reports what it found -- its classification
+                // and the geometry, in the reactive plane's spare lanes -- and
+                // the two intersectors do not decide an edge identically. A
+                // pixel where they found different things has not been shaded
+                // differently from the same hit; it is a different hit, and
+                // comparing the radiance there measures the disagreement
+                // rather than the shading.
+                //
+                // Excluded by name and *counted*, never absorbed. An
+                // exclusion that is not reported is a widened bound wearing a
+                // better word, so the count is printed and gated: if this
+                // grows, the two structures have diverged and that is a
+                // finding, not a detail to skip past.
+                const auto rasterHit = rendered.gbuffer[centre];
+                const auto oracleHit = expected.pixels[centre];
+                if (rasterHit.reserved[0] != oracleHit.reserved[0] ||
+                    rasterHit.reserved[1] != oracleHit.reserved[1] ||
+                    rasterHit.reserved[2] != oracleHit.reserved[2]) {
+                    ++divergentHitPixels;
+                    continue;
+                }
                 ++shadowInterior;
                 // Mixed absolute and relative. These are unbounded HDR values,
                 // so a fixed epsilon silently becomes a tighter relative
@@ -6848,6 +6885,11 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     const auto passed = submitted && wrote &&
         comparison.identityMismatches == 0 &&
         interior.mismatchedPixels == 0 &&
+        // The exclusion is bounded, or it becomes a way of not comparing the
+        // picture. A quarter of a per cent of the interior is what two
+        // intersectors disagree about on this fixture; an order of magnitude
+        // more means they have diverged and that is the finding.
+        (!options.reflections || divergentHitPixels * 100 <= shadowInterior) &&
         (!options.shadows ||
             (shadowInterior > 0 &&
                 shadowInteriorMismatches <= shadowInterior / 1000)) &&
@@ -6992,6 +7034,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " tone-max-code=" << maximumToneCode
               << " hdr-max-error=" << maximumHdrError
               << " hdr-differing=" << differingHdrPixels
+              << " divergent-hits=" << divergentHitPixels
               << " shadow-interior=" << shadowInterior
               << " shadow-interior-mismatches=" << shadowInteriorMismatches
               << " shadow-interior-max-error="

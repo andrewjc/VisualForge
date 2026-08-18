@@ -4658,3 +4658,47 @@ measure drift rather than the term; and a stage timer read while the stage is
 being skipped reports that the stage is free. All three produced numbers that
 looked like evidence, and one of them was written into this journal as a
 finding before it was caught.
+
+## The prerequisite three phases were waiting on
+
+Three separate items had stalled on the same thing, and it took stalling three
+times to see it was one thing. Interpolating a vertex colour at a ray hit
+(phase 19), fetching a texture at one (phase 19), alpha-testing a cutout
+occluder (phase 18) and averaging more than one reflection sample (phase 19
+again) all make the *same* latent disagreement visible: two intersectors do
+not decide an edge identically, and while both sides shade a hit to one value
+for the whole surface, nothing can tell.
+
+A radiance comparison cannot separate "the two shaded the same hit
+differently" from "the two hit different things". Only the first is a defect.
+Every attempt to land a per-hit attribute therefore ended at the same place --
+widen two count bounds, or revert -- and the last one was reverted with the
+constraint written down rather than the feature landed.
+
+Both sides now report what their reflection ray found, in the reactive
+plane's three spare lanes: the classification, the geometry, and the primitive
+within it. The lanes were already reserved and already read back, so this
+costs no attachment and no ABI. The interior comparison excludes pixels where
+the two disagree, **and counts them**, and the count is bounded at one per
+cent of the interior. An exclusion that is not reported is a widened bound
+wearing a better word.
+
+The measurement is the interesting part:
+
+| identity compared | divergent pixels |
+| --- | --- |
+| object | **0** |
+| object *and* primitive | **117** of 41,981 |
+
+Nothing disagrees about which *object* a reflection ray found. 0.28% disagree
+about which *triangle of it*. That is precisely the case an interpolated
+attribute exposes and a per-object mask would have missed entirely -- and it
+explains the earlier failure exactly: the 93 mismatched pixels that stopped the
+vertex-colour interpolation were the same hit at slightly different
+barycentrics, not different hits.
+
+Had this been built with object identity, it would have excluded nothing,
+reported a clean zero, and the next attempt at a per-hit attribute would have
+failed for reasons that looked unrelated.
+
+The three items are not implemented by this. What they were missing is.

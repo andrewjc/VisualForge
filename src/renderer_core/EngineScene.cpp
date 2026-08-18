@@ -1502,6 +1502,15 @@ ScenePacketError RenderReferenceGBuffer(
                         // reactive would tell the upscaler to distrust the
                         // whole image. Only the transparent pass raises it.
                         destination.reactive = 0.0f;
+                        // Mirrors the reactive plane's spare lanes in
+                        // family_scene.frag: the reflection's classification
+                        // and the geometry it found. Zero on both means a
+                        // pixel whose reflection was never evaluated, which
+                        // is what an unreflective surface reports on the
+                        // device too.
+                        destination.reserved[0] = 0.0f;
+                        destination.reserved[1] = 0.0f;
+                        destination.reserved[2] = 0.0f;
                         if (hdr != nullptr) {
                             // The glow mask at this point, sampled through
                             // the same coordinates the base colour used, so
@@ -1579,6 +1588,16 @@ ScenePacketError RenderReferenceGBuffer(
                                         reflect::SampleSequence(x, y, 0, 0),
                                         {0.0f, 0.0f, 0.0f}, false);
                                 reflection = reflected.radiance;
+                                // What this ray found, recorded beside the
+                                // radiance so a contract can ask whether the
+                                // two intersectors agree about the ray before
+                                // it asks whether they agree about the light.
+                                destination.reserved[0] =
+                                    static_cast<float>(reflected.source);
+                                destination.reserved[1] = static_cast<float>(
+                                    reflected.hitObjectIndex);
+                                destination.reserved[2] = static_cast<float>(
+                                    reflected.hitPrimitiveIndex);
                             }
                             // One bounce of diffuse indirect, over the same
                             // geometry the reflection traces.

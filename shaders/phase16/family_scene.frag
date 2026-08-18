@@ -160,6 +160,8 @@ void main()
     vec3 reflection = vec3(0.0);
 #ifdef VF_RAY_QUERY
     uint reflectionSource;
+    uint reflectionHitObject = 0u;
+    uint reflectionHitPrimitive = 0u;
     reflection = vfReflection(
         vertexCameraRelative,
         geometric,
@@ -172,7 +174,9 @@ void main()
             0u, 0u),
         vec3(0.0),
         false,
-        reflectionSource);
+        reflectionSource,
+        reflectionHitObject,
+        reflectionHitPrimitive);
 #endif
     // One bounce of diffuse indirect, traced against the same structure.
     vec3 indirect = vec3(0.0);
@@ -221,10 +225,29 @@ void main()
     // and an opaque-classified blended draw has a coverage of one whatever
     // its material says. The mask is about the effect, so it reads the
     // effect's alpha -- which is also what the host contract takes.
+    // The reactive mask, and beside it what this pixel's reflection ray
+    // found. The three lanes after the mask were reserved and unused; the
+    // readback already carries them, so reporting the hit costs no
+    // attachment and no ABI.
+    //
+    // This is what lets a contract compare two intersectors honestly. A
+    // radiance difference alone cannot separate "the two shaded the same hit
+    // differently" from "the two hit different things", and the second is not
+    // a defect in either. With the hit reported, those pixels can be excluded
+    // by name and counted, which is the difference between an exclusion and a
+    // widened bound.
+    float reflectionSourceOut = 0.0;
+    float reflectionHitOut = 0.0;
+    float reflectionPrimitiveOut = 0.0;
+#ifdef VF_RAY_QUERY
+    reflectionSourceOut = float(reflectionSource);
+    reflectionHitOut = float(reflectionHitObject);
+    reflectionPrimitiveOut = float(reflectionHitPrimitive);
+#endif
     gbufferReactive = vec4(
         scenePush.blend == kVfBlendOpaque
             ? 0.0
             : vfReactiveMask(scenePush.blend,
                   vec4(surface, surfaceAlpha)),
-        0.0, 0.0, 0.0);
+        reflectionSourceOut, reflectionHitOut, reflectionPrimitiveOut);
 }

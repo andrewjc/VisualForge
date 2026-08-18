@@ -193,7 +193,18 @@ vec3 vfReflection(
     vec2 xi,
     vec3 probeRadiance,
     bool probeAvailable,
-    out uint source)
+    out uint source,
+    // Which geometry the ray found, one-based, or zero for none. A contract
+    // compares this against the oracle's before it compares radiance: two
+    // intersectors that disagree about which side of an edge a ray passed
+    // have not shaded the same hit differently, they have hit different
+    // things, and only one of those is a defect.
+    out uint hitObject,
+    // And which triangle of it, numbered as the ray query numbers a
+    // primitive within its geometry. Object identity alone is too coarse:
+    // two intersectors disagreeing about an edge inside one object report
+    // the same object and different barycentrics.
+    out uint hitPrimitive)
 {
     GpuEnvironmentV1 environment = sceneEnvironment.record;
     // Switched off for the frame, mirroring reflect::EvaluateReflection.
@@ -202,6 +213,8 @@ vec3 vfReflection(
     if ((environment.flagsAndCount.x & kVfEnvironmentReflectionDisabled)
         != 0u) {
         source = kVfReflectionSkipped;
+        hitObject = 0u;
+        hitPrimitive = 0u;
         return vec3(0.0);
     }
     vec3 normal = normalize(shadingNormal);
@@ -213,6 +226,8 @@ vec3 vfReflection(
     // too wide to trace, reported as policy rather than disguised as a hit.
     if (!(roughness <= kVfReflectionRoughnessCutoff)) {
         source = kVfReflectionSkipped;
+        hitObject = 0u;
+        hitPrimitive = 0u;
         return fresnel * vfMissRadiance(environment,
             vfMirrorDirection(viewDirection, normal), probeRadiance,
             probeAvailable);
@@ -236,6 +251,8 @@ vec3 vfReflection(
     if (rayQueryGetIntersectionTypeEXT(query, true) ==
         gl_RayQueryCommittedIntersectionNoneEXT) {
         source = vfResolveMiss(environment, probeAvailable);
+        hitObject = 0u;
+        hitPrimitive = 0u;
         return fresnel * vfMissRadiance(environment, direction, probeRadiance,
             probeAvailable);
     }
@@ -265,6 +282,9 @@ vec3 vfReflection(
 
 
     source = kVfReflectionGeometry;
+    hitObject = objectIndex + 1u;
+    hitPrimitive =
+        rayQueryGetIntersectionPrimitiveIndexEXT(query, true) + 1u;
     // Shaded through the same function the raster pass uses, so a reflection
     // cannot disagree with the surface it is reflecting.
     return fresnel * vfShadeSurface(environment, hitAlbedo, hitPosition,

@@ -135,6 +135,11 @@ struct ReflectionResult
     std::array<float, 3> radiance{};
     ReflectionSource source{ReflectionSource::Unresolved};
     float hitDistance{};
+    // The geometry this reflection found, or zero when it found none. Paired
+    // with `source`, it is what a contract compares to decide whether the two
+    // intersectors agree about the ray, before comparing what they shaded.
+    std::uint32_t hitObjectIndex{};
+    std::uint32_t hitPrimitiveIndex{};
 };
 
 // History identity. A reflection history is only valid for the epoch that
@@ -254,6 +259,18 @@ struct ReflectionTriangle
     // so both sides read the same per-object value or they cannot agree.
     std::array<float, 3> normal{0.0f, 0.0f, 1.0f};
     std::array<float, 3> albedo{1.0f, 1.0f, 1.0f};
+    std::uint32_t primitiveIndex{};
+    // Which drawn geometry this triangle belongs to, carried so a hit can be
+    // *identified* and not only shaded.
+    //
+    // Two intersectors do not agree bit for bit about which side of an edge a
+    // ray passed, and the disagreement is invisible while both sides shade a
+    // hit to the same value. Any per-hit attribute makes it visible, which is
+    // what stopped the interpolated vertex colour, the texture fetch at a hit
+    // and the multi-sample reflection from landing. Comparing what each side
+    // *hit* lets those pixels be excluded from a radiance comparison by name,
+    // rather than by widening a bound until they fit.
+    std::uint32_t objectIndex{};
     bool twoSided{};
 };
 
@@ -261,6 +278,13 @@ struct ReflectionHit
 {
     bool hit{};
     float distance{};
+    // The triangle.s own geometry, so a caller can report what was hit.
+    std::uint32_t objectIndex{};
+    // And which triangle of it. Object identity alone is too coarse: two
+    // intersectors that disagree about an edge *within* one object report the
+    // same object and different barycentrics, which is exactly the case an
+    // interpolated attribute exposes.
+    std::uint32_t primitiveIndex{};
     std::array<float, 3> position{};
     std::array<float, 3> normal{};
     std::array<float, 3> albedo{};
