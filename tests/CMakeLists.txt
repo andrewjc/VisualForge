@@ -316,6 +316,25 @@ if(TARGET VisualForgeRenderer)
         RUN_SERIAL TRUE
     )
 
+    # Whether the reflection ray finds geometry, which the family fixture
+    # could not answer: its reflective plate faced the camera, so the mirror
+    # direction pointed at the space between plate and viewer -- necessarily
+    # empty, because anything there would occlude the plate. This fixture
+    # computes the geometry instead of choosing it, and renders three
+    # variants so "the reflection carries the target" and "the traced path
+    # differs from the fallback at all" are separate measurements.
+    add_test(NAME contract.mirror_scene_frame
+        COMMAND $<TARGET_FILE:vf_packet_replay>
+            --render-mirror-scene
+            --backend $<TARGET_FILE:VisualForgeRenderer>
+            --output ${CMAKE_CURRENT_BINARY_DIR}/phase19-mirror.ppm
+            --validation
+    )
+    set_tests_properties(contract.mirror_scene_frame PROPERTIES
+        LABELS "contract;gpu;phase19"
+        RUN_SERIAL TRUE
+    )
+
     # The temporal half of phase 20. Compares whole histories rather than a
     # picture: accumulation has no picture of its own, it decides how fast one
     # appears, and a pass that blended a rejected sample would look like a
