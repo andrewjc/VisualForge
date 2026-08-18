@@ -246,3 +246,23 @@ for more than one sample per pixel is therefore narrower than previously
 recorded here: both sides must intersect **bit-identical** triangle data. That
 is a change to how the reference derives its geometry, not a tolerance and not
 a mask.
+
+## Correction: the per-hit attribute blocker is a fetch defect, not a limit
+
+This document previously recorded that interpolated attributes, texture fetch
+at a hit and multi-sample reflections all needed both sides to intersect
+bit-identical triangle data. Measured, that prerequisite is already met: the
+device and the reference agree about where a reflection ray hits to
+`5.1e-05` units, so the barycentrics that follow agree to about the same and
+cannot account for the `0.036` error the interpolation produced.
+
+The remaining explanation is that the two interpolate different *data*. The
+device recovers its corner attributes through offsets this renderer computes
+from the upload layout and the plan's vertex offset, with a separate 16-bit
+index-unpacking path; reading from the wrong place there produces real values
+from the wrong vertices, which is indistinguishable from a shading
+disagreement until it is looked for.
+
+The next step is to prove the fetch, not to change the reference: hold the
+corner colours constant per triangle so interpolation cannot matter, confirm
+the device reproduces the oracle exactly, then vary one corner at a time.

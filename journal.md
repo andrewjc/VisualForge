@@ -4750,3 +4750,46 @@ pixels where the two structures genuinely disagree about which triangle a ray
 found. If that number moves, the two have diverged. What it does not do is
 license an interpolated attribute, and the phase 19 document now says so
 rather than implying the prerequisite is met.
+
+## The blocker specified twice does not exist
+
+The prerequisite for a per-hit attribute was specified twice and was wrong
+both times. First: the two intersectors hit different things, so exclude those
+pixels. Built, measured, and the interpolation still failed -- 117 excluded,
+200 mismatching against a bound of 41. Second: they intersect independently
+transformed triangles, so the hit *point* differs sub-primitive and any
+attribute varying across a triangle inherits it. That one was recorded here as
+the narrower, concrete prerequisite.
+
+It was inference. Measured, by carrying the hit distance from both sides
+through the reactive plane's spare lane and differencing on pixels where they
+agree about what they hit:
+
+```text
+divergent-hits=0 hit-distance-delta=5.14984e-05
+```
+
+**The two agree about where the ray hit to five parts in a hundred thousand.**
+The barycentrics that follow agree to about the same, and an interpolated
+colour from them would agree to about the same. That cannot produce the 0.036
+error the interpolation showed. Both stories are dead.
+
+Which leaves the one explanation neither specification allowed for: the device
+and the oracle were interpolating *different data*. The device reads its
+corner colours through `firstVertexFloat + vertex * kVfVertexFloats`, an offset
+this renderer computes itself from the upload layout and the plan's vertex
+offset, and reads its indices through a second computed offset with a 16-bit
+unpacking path beside it. Any of those being wrong reads real floats from the
+wrong place -- which looks exactly like a small disagreement about shading and
+is a defect, not a limit.
+
+So the work is not blocked on an architectural change to how the reference
+derives its geometry. It is blocked on a bug in the attribute fetch, and the
+next step is to prove the fetch reads what it should: hold the corner colours
+constant per triangle and confirm the device reproduces the oracle exactly,
+then vary one corner at a time.
+
+Three specifications of this prerequisite, two of them confident and written
+down, and the measurement that settled it cost one temporary lane and one
+contract run. The pattern is the same one this session keeps producing: the
+inference was plausible, the measurement was cheap, and they disagreed.
