@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <vector>
 
 using namespace vf::renderer;
@@ -200,18 +201,41 @@ TEST_CASE("PLS_translation_turns_repeated_meshes_into_instances",
     CHECK(packet.objects.size() == 2);
     CHECK(packet.instances.size() == 6);
 
-    // The instance transforms are the ones the draws carried, in order.
-    CHECK(packet.instances[0].model[3] == Catch::Approx(0.0f));
-    CHECK(packet.instances[1].model[3] == Catch::Approx(100.0f));
-    CHECK(packet.instances[4].model[3] == Catch::Approx(400.0f));
-
-    // Every instance points at an object that exists, and the five copies all
-    // point at the same one.
+    // Every instance points at an object that exists.
     for (const auto& instance : packet.instances) {
         REQUIRE(instance.objectIndex < packet.objects.size());
     }
-    CHECK(packet.instances[0].objectIndex == packet.instances[4].objectIndex);
-    CHECK(packet.instances[0].objectIndex != packet.instances[5].objectIndex);
+
+    // The five copies are grouped under one object and carry the transforms
+    // their draws did, in submission order *within* that object.
+    //
+    // Located by counting rather than by position, because the packet's object
+    // order is deliberately not the engine's submission order: the raster
+    // packet is cached across frames and paired to the scene positionally, so
+    // an order that follows the engine makes a cached frame resolve the wrong
+    // material. Asserting a position here would pin the very thing that had to
+    // stop depending on the engine.
+    std::map<std::uint32_t, std::vector<float>> byObject;
+    for (const auto& instance : packet.instances) {
+        byObject[instance.objectIndex].push_back(instance.model[3]);
+    }
+    REQUIRE(byObject.size() == 2);
+    const std::vector<float> expectedFive{0.0f, 100.0f, 200.0f, 300.0f,
+        400.0f};
+    auto sawFive = false;
+    auto sawOne = false;
+    for (const auto& [object, offsets] : byObject) {
+        if (offsets.size() == 5) {
+            sawFive = true;
+            for (std::size_t copy = 0; copy < offsets.size(); ++copy) {
+                CHECK(offsets[copy] == Catch::Approx(expectedFive[copy]));
+            }
+        } else if (offsets.size() == 1) {
+            sawOne = true;
+        }
+    }
+    CHECK(sawFive);
+    CHECK(sawOne);
 
     // The packet the engine's own validator accepts, or the translation has
     // produced something no consumer can use.
@@ -410,7 +434,22 @@ TEST_CASE("PLS_assembly_draws_only_the_geometry_it_actually_has",
         0.0f, 1.0f, 0.0f};
     const std::array<std::uint32_t, 3> indices{0, 1, 2};
     drawstream::AssembledMesh held{};
-    held.identity = packet.objects[0].objectId;
+    // The mesh drawn more than once -- the one whose instancing this case
+    // exists to follow through assembly -- chosen by that property rather
+    // than by its position. The packet's object order is deliberately not the
+    // engine's submission order, because the raster packet is cached across
+    // frames and paired to the scene positionally, so an order that followed
+    // the engine made a cached frame resolve the wrong material.
+    std::map<std::uint32_t, std::uint32_t> placements;
+    for (const auto& instance : packet.instances) {
+        ++placements[instance.objectIndex];
+    }
+    auto repeated = packet.objects.size();
+    for (const auto& [object, count] : placements) {
+        if (count > 1) repeated = object;
+    }
+    REQUIRE(repeated < packet.objects.size());
+    held.identity = packet.objects[repeated].objectId;
     held.vertexStride = 12;
     // The layout is declared, not implied by the stride. A stride of twelve
     // is equally consistent with three floats and with four halves plus a

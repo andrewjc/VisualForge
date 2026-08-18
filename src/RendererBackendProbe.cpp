@@ -1129,6 +1129,102 @@ bool BuildLiveSceneGeometry(
             rasterPacket.draws.size(), drawsCcw);
     }
 
+    // Why the backend refuses this frame, told apart before it is sent.
+    //
+    // `missing material` covers two different faults and the backend reports
+    // one string for both: a duplicate resource id in the registry, or a draw
+    // whose material does not match its object's. Measured live, the mirror
+    // refused every world frame from the moment the cell arrived and presented
+    // none of them -- which is why the engine kept drawing the world, because
+    // suppression is fail-open and only drops draws once the mirror presents.
+    if (frameId % 120 == 0) {
+        std::unordered_map<std::uint64_t, std::uint32_t> seen;
+        seen.reserve(rasterPacket.materials.size());
+        std::uint32_t duplicateIds = 0;
+        for (const auto& material : rasterPacket.materials) {
+            if (++seen[material.resourceId] == 2) ++duplicateIds;
+        }
+        std::uint32_t drawOutOfRange = 0;
+        std::uint32_t materialMismatch = 0;
+        std::uint32_t unresolved = 0;
+        for (const auto& object : scenePacket.objects) {
+            if (object.drawIndex >= rasterPacket.draws.size()) {
+                ++drawOutOfRange;
+                continue;
+            }
+            if (rasterPacket.draws[object.drawIndex].materialId !=
+                object.materialId) {
+                ++materialMismatch;
+            }
+            if (seen.find(object.materialId) == seen.end()) ++unresolved;
+        }
+        log::Write("renderer-material-check: materials=%zu objects=%zu "
+            "draws=%zu duplicate-ids=%u draw-out-of-range=%u "
+            "material-mismatch=%u unresolved=%u",
+            rasterPacket.materials.size(), scenePacket.objects.size(),
+            rasterPacket.draws.size(), duplicateIds, drawOutOfRange,
+            materialMismatch, unresolved);
+    }
+
+    // The largest objects in the frame by planar footprint.
+    //
+    // The ground is missing from the mirror and the engine's declared vertex
+    // formats carry no landscape channels, which leaves two possibilities:
+    // the landscape is drawn through a stream the capture never sees, or it
+    // is in the packet and rendering wrongly. A cell quadrant is 2048 units
+    // across and nothing else in a settlement approaches that, so the extent
+    // separates them without needing to identify the format first.
+    if (frameId % 120 == 0 && !rasterPacket.draws.empty()) {
+        struct Footprint
+        {
+            std::size_t draw{};
+            float extentX{};
+            float extentY{};
+            float extentZ{};
+            std::uint32_t indices{};
+        };
+        std::vector<Footprint> footprints;
+        footprints.reserve(rasterPacket.draws.size());
+        for (std::size_t index = 0; index < rasterPacket.draws.size();
+             ++index) {
+            const auto& draw = rasterPacket.draws[index];
+            std::array<float, 3> low{std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max(),
+                std::numeric_limits<float>::max()};
+            std::array<float, 3> high{std::numeric_limits<float>::lowest(),
+                std::numeric_limits<float>::lowest(),
+                std::numeric_limits<float>::lowest()};
+            for (std::uint32_t entry = 0; entry < draw.indexCount; ++entry) {
+                const auto slot = static_cast<std::size_t>(
+                    static_cast<std::int64_t>(
+                        rasterPacket.indices[draw.firstIndex + entry]) +
+                    draw.vertexOffset);
+                if (slot >= rasterPacket.vertices.size()) continue;
+                const auto& vertex = rasterPacket.vertices[slot];
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    low[axis] = std::min(low[axis], vertex.position[axis]);
+                    high[axis] = std::max(high[axis], vertex.position[axis]);
+                }
+            }
+            if (low[0] > high[0]) continue;
+            footprints.push_back({index, high[0] - low[0], high[1] - low[1],
+                high[2] - low[2], draw.indexCount});
+        }
+        std::sort(footprints.begin(), footprints.end(),
+            [](const Footprint& a, const Footprint& b) {
+                return a.extentX * a.extentY > b.extentX * b.extentY;
+            });
+        const auto reported = std::min<std::size_t>(footprints.size(), 5);
+        for (std::size_t entry = 0; entry < reported; ++entry) {
+            const auto& print = footprints[entry];
+            log::Write("renderer-footprint: rank=%zu draw=%zu extent=["
+                "%.1f,%.1f,%.1f] indices=%u",
+                entry, print.draw, static_cast<double>(print.extentX),
+                static_cast<double>(print.extentY),
+                static_cast<double>(print.extentZ), print.indices);
+        }
+    }
+
     // The frame's texture library, and each material's index into it.
     //
     // AssembleSceneGeometry emits exactly one material per surviving object,
@@ -1330,37 +1426,51 @@ bool BuildLiveSceneGeometry(
     // only keeps its slot while it still names the same bytes.
     fold(rasterPacket.draws.size());
     fold(rasterPacket.materials.size());
-    // Order-independent, because the order genuinely is not part of what the
-    // frame looks like here and it is not stable.
+    // Order-*sensitive*, and that is the whole point.
     //
-    // Objects are grouped in draw-submission order, which the engine varies
-    // between frames, so an order-sensitive key never matched twice and the
-    // packet was re-encoded every frame -- 50 ms for 67 MB that had not
-    // changed. Every draw carries its own vertex range, index range and
-    // material id, and this class is opaque and depth-tested, so a permutation
-    // of the same draws is the same picture.
-    std::uint64_t drawSet = 0;
+    // It was an order-independent XOR, on the reasoning that a permutation of
+    // the same opaque depth-tested draws is the same picture. That is true of
+    // the picture and false of the packet. The scene packet pairs an object to
+    // a draw positionally -- the backend resolves
+    // `draws[object.drawIndex].materialId` and refuses the frame when it
+    // disagrees -- and the scene packet is re-encoded every frame because its
+    // transforms are camera relative and move, while this one is reused.
+    //
+    // So a permuted frame served cached draws in the previous order against a
+    // scene in the current one, every object resolved somebody else's
+    // material, and the backend refused the frame with `missing material`.
+    // Measured live: the mirror presented the loading screen and then not one
+    // world frame for the rest of the run -- and because suppression is
+    // fail-open and only drops engine draws once the mirror presents, the
+    // engine went on drawing the world. What looked like the D3D renderer
+    // "swapping in" was the D3D renderer never having stopped.
+    //
+    // A permutation is now a miss, which costs a re-encode on the frames the
+    // engine reorders. That is the honest trade: the alternative is a cheaper
+    // frame that the backend throws away.
+    std::uint64_t drawSequence = 0xCBF2'9CE4'8422'2325ull;
     for (const auto& draw : rasterPacket.draws) {
-        std::uint64_t one = 0xCBF2'9CE4'8422'2325ull;
         for (const auto field : {static_cast<std::uint64_t>(draw.firstIndex),
                  static_cast<std::uint64_t>(draw.indexCount),
                  static_cast<std::uint64_t>(
                      static_cast<std::uint32_t>(draw.vertexOffset)),
                  draw.materialId,
                  static_cast<std::uint64_t>(draw.frontFace)}) {
-            one = (one ^ field) * 0x0000'0100'0000'01B3ull;
+            drawSequence = (drawSequence ^ field) * 0x0000'0100'0000'01B3ull;
         }
-        drawSet ^= one;
     }
-    fold(drawSet);
-    std::uint64_t materialSet = 0;
+    fold(drawSequence);
+    // Sequenced for the same reason: the registry is resolved by id, but a
+    // material's position is what a draw's index into it means.
+    std::uint64_t materialSequence = 0xCBF2'9CE4'8422'2325ull;
     for (const auto& material : rasterPacket.materials) {
-        std::uint64_t one = 0xCBF2'9CE4'8422'2325ull;
-        one = (one ^ material.resourceId) * 0x0000'0100'0000'01B3ull;
-        one = (one ^ material.textureIndex) * 0x0000'0100'0000'01B3ull;
-        materialSet ^= one;
+        materialSequence =
+            (materialSequence ^ material.resourceId) * 0x0000'0100'0000'01B3ull;
+        materialSequence =
+            (materialSequence ^ material.textureIndex) *
+            0x0000'0100'0000'01B3ull;
     }
-    fold(materialSet);
+    fold(materialSequence);
     static std::uint64_t s_encodedSignature = 0;
     static bool s_encodedValid = false;
     const auto reuseEncoded = s_encodedValid &&

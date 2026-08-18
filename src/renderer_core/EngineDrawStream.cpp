@@ -230,6 +230,34 @@ DrawStreamError TranslateDrawStream(
 
         if (groups.empty()) return DrawStreamError::EmptyGeometry;
 
+        // Ordered by identity, not by the order the engine submitted its
+        // draws in.
+        //
+        // The scene packet pairs an object to a draw *positionally*: the
+        // backend resolves `draws[object.drawIndex].materialId` and refuses
+        // the frame when it disagrees. The raster packet is cached across
+        // frames on a key that is deliberately order-independent, because a
+        // permutation of the same draws is the same picture -- while the
+        // scene packet is re-encoded every frame, because its transforms are
+        // camera relative and move.
+        //
+        // Those two are only compatible if this order does not depend on the
+        // engine. It did. Fallout 4 varies submission order between frames,
+        // so a cached raster packet held one order while the fresh scene
+        // packet held another, every object resolved somebody else's
+        // material, and the backend refused the frame. Measured live: the
+        // mirror presented the loading screen and then not one world frame,
+        // which is why the engine kept drawing the world -- suppression is
+        // fail-open and only drops draws once the mirror presents.
+        //
+        // Identity is the right key because it is what the arena, the encode
+        // cache and the mesh-churn monitor already key on, so all four agree
+        // about what "the same mesh" means.
+        std::sort(groups.begin(), groups.end(),
+            [](const MeshGroup& left, const MeshGroup& right) {
+                return left.identity < right.identity;
+            });
+
         std::size_t instanceTotal = 0;
         for (const auto& group : groups) instanceTotal += group.draws.size();
         if (instanceTotal > limits.maximumInstances) {
