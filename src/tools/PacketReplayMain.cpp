@@ -6477,6 +6477,12 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     std::uint64_t decalCoveredPixels = 0;
     std::uint64_t decalClippedPixels = 0;
     std::uint64_t decalShadedPixels = 0;
+    // How far the projection actually moves a pixel, not only how many it
+    // moves past a threshold. `decal-shaded` read zero while `decal-clipped`
+    // read twenty, which is either a broken measure or a projection that only
+    // removes pixels the decal was not visibly contributing to -- and a count
+    // cannot tell those apart.
+    float maximumDecalShaded = 0.0f;
     if (options.transparency && submitted && baselineRendered &&
         decalOnlyRendered) {
         for (std::size_t index = 0; index < pixelCount; ++index) {
@@ -6493,8 +6499,12 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
                 // "clipped away entirely" both differ from a baseline that
                 // drew it opaque -- a comparison against the baseline cannot
                 // tell a projection from a discard.
-                if (std::abs(decalUnclippedHdr[index][channel] -
-                        decalOnlyHdr[index][channel]) > 1.0e-4f) {
+                const auto clippedDelta =
+                    std::abs(decalUnclippedHdr[index][channel] -
+                        decalOnlyHdr[index][channel]);
+                maximumDecalShaded =
+                    std::max(maximumDecalShaded, clippedDelta);
+                if (clippedDelta > 1.0e-4f) {
                     unclipped = true;
                 }
             }
@@ -6880,6 +6890,12 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         // projection it is supposed to be doing is never exercised.
         (!options.transparency || decalCoveredPixels > 0) &&
         (!options.transparency || decalClippedPixels > 0) &&
+        // And the projection changed the picture, not only the reactive
+        // plane. A projection that discarded fragments the decal was not
+        // visibly contributing to would satisfy the clip count while making
+        // no difference to the image, which is indistinguishable from one
+        // that ran and did nothing.
+        (!options.transparency || decalShadedPixels > 0) &&
         // Indirect light is a stochastic estimator, and a ray-triangle hit
         // decision at an edge is not bit-identical between this oracle and
         // the hardware intersector. With eight rays a single flipped ray
@@ -6964,6 +6980,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " decal-covered=" << decalCoveredPixels
               << " decal-clipped=" << decalClippedPixels
               << " decal-shaded=" << decalShadedPixels
+              << " decal-shaded-max=" << maximumDecalShaded
               << " decal-draws=" << decalDrawCount
               << " transparent-gbuffer-pixels=" << blendedGbufferPixels
               << " transparent-refracted=" << refractedPixels

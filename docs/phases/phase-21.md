@@ -49,11 +49,23 @@ to composite something — inheriting it made every one of them draw no layer.
 
 Stated gaps, not silent ones:
 
-- **`decal-shaded` reads zero and nothing gates it.** The projection itself is
-  implemented and called: `TransparentDrawRecordV1` carries the volume,
-  `vfProjectDecal` applies range, radius and facing, and `family_scene.frag`
-  discards a fragment the volume rejects. `decal-covered` is 5,028 and
-  `decal-clipped` is 20, both gated and both satisfied.
+- **The decal falloff is unguarded.** `decal-shaded` -- the difference between
+  the projecting render and one with the projection disabled -- now reads 135
+  pixels with a maximum delta of 0.039, and it is gated: a projection that
+  discarded only fragments the decal was not visibly contributing to would
+  satisfy the clip count while making no difference to the image, which is
+  indistinguishable from one that ran and did nothing.
+
+  It had been recorded here as reading zero. That was a stale observation from
+  before the additive-baseline and albedo work changed what this fixture
+  renders -- `decal-covered` moved from 5,028 to 262 over the same period --
+  and it was written into this document as a defect without being re-measured.
+
+  What the gate does *not* cover: removing `coverage.coverage *= projected`
+  while keeping the discard passes both bounds. The 135 pixels come from
+  discarded fragments, not from the falloff, so the falloff's own contribution
+  is still untested. A magnitude bound on `decal-shaded-max` is the natural
+  form and is not implemented here.
 
   But `decal-shaded` differences the projecting render against one with the
   projection disabled, and it reads 0 while 20 pixels are demonstrably being
