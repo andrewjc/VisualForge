@@ -305,3 +305,22 @@ It carries a design consequence: excluding a pixel when any of eight rays
 diverges is a few per cent of the frame rather than a quarter of one per cent,
 and whether that remains a comparison worth having is a judgement call, not a
 measurement.
+
+## The measured blocker
+
+`divergent-bounces=9877` of 41,981 interior pixels: **23.5% have at least one
+of their eight diffuse-bounce rays hitting different geometry on the device
+than in the reference.** The reflection's single ray disagrees on 0.28%.
+
+The same run passes at 41 mismatches, because with no attribute varying across
+a surface a divergent ray reads the same flat per-object albedo and shades
+identically. The disagreement is total and invisible until a per-hit attribute
+is introduced.
+
+Texture fetch at a hit, interpolated attributes and multi-sample reflections
+are therefore not blocked by a defect in this renderer. They are blocked by
+two intersectors sampling eight stochastic directions and not agreeing about a
+quarter of the pixels. The three ways forward -- exclude a quarter of the
+frame, compare the bounce statistically as a stochastic estimator, or have the
+reference trace against the device's own structure -- are judgements about
+what this contract is for.

@@ -6783,6 +6783,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
     // Reported so the exclusion is visible, and bounded so it cannot grow
     // into a way of not comparing the picture at all.
     std::uint64_t divergentHitPixels = 0;
+    std::uint64_t divergentBouncePixels = 0;
     std::uint64_t shadowInteriorMismatches = 0;
     float maximumShadowInteriorError = 0.0f;
     std::uint32_t worstX = 0;
@@ -6848,10 +6849,12 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
                 const auto rasterHit = rendered.gbuffer[centre];
                 const auto oracleHit = expected.pixels[centre];
                 if (rasterHit.reserved[0] != oracleHit.reserved[0] ||
-                    rasterHit.reserved[1] != oracleHit.reserved[1] ||
-                    rasterHit.reserved[2] != oracleHit.reserved[2]) {
+                    rasterHit.reserved[1] != oracleHit.reserved[1]) {
                     ++divergentHitPixels;
                     continue;
+                }
+                if (rasterHit.reserved[2] != oracleHit.reserved[2]) {
+                    ++divergentBouncePixels;
                 }
                 ++shadowInterior;
                 // Mixed absolute and relative. These are unbounded HDR values,
@@ -7035,6 +7038,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " hdr-max-error=" << maximumHdrError
               << " hdr-differing=" << differingHdrPixels
               << " divergent-hits=" << divergentHitPixels
+              << " divergent-bounces=" << divergentBouncePixels
               << " shadow-interior=" << shadowInterior
               << " shadow-interior-mismatches=" << shadowInteriorMismatches
               << " shadow-interior-max-error="

@@ -277,8 +277,10 @@ std::array<float, 3> EvaluateIndirect(
     const std::uint32_t pixelX,
     const std::uint32_t pixelY,
     const std::uint32_t frameIndex,
-    IndirectSource& source) noexcept
+    IndirectSource& source,
+    float* const hitProbe) noexcept
 {
+    if (hitProbe != nullptr) *hitProbe = 0.0f;
     source = IndirectSource::Skipped;
     std::array<float, 3> total{};
     if (preset.raysPerPixel == 0) return total;
@@ -360,6 +362,12 @@ std::array<float, 3> EvaluateIndirect(
             }
         }
 
+        // Summarised per ray, so one number says whether all eight of this
+        // pixel.s bounce rays found what the other side found.
+        if (hitProbe != nullptr) {
+            *hitProbe += static_cast<float>(
+                (hit.objectIndex + 1u) * 131u + hit.primitiveIndex + 1u);
+        }
         const auto bounded = ClampRadiance(radiance, rules);
         for (std::size_t channel = 0; channel < 3; ++channel) {
             total[channel] += bounded[channel];

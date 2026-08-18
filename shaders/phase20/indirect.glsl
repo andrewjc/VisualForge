@@ -53,13 +53,18 @@ vec3 vfIndirect(
     uint pixelX,
     uint pixelY,
     uint frameIndex,
-    out uint source)
+    out uint source,
+    // Mirrors the reference.s optional bounce summary: what every ray of
+    // this pixel found, so a contract can tell an intersector disagreement
+    // in the bounce from a shading one.
+    out float hitProbe)
 {
     source = kVfIndirectSkipped;
     vec3 total = vec3(0.0);
     uint declared = sceneEnvironment.record.flagsAndCount.z;
     uint rays = declared == 0u
         ? kVfIndirectRays : min(declared, kVfIndirectRaysMaximum);
+    hitProbe = 0.0;
     if (rays == 0u) return total;
 
     GpuEnvironmentV1 environment = sceneEnvironment.record;
@@ -106,6 +111,8 @@ vec3 vfIndirect(
                 rayQueryGetIntersectionGeometryIndexEXT(query, true);
             uint objectIndex = geometry < sceneGeometryObjects.records.length()
                 ? sceneGeometryObjects.records[geometry] : 0u;
+            hitProbe += float((objectIndex + 1u) * 131u +
+                rayQueryGetIntersectionPrimitiveIndexEXT(query, true) + 1u);
             float distance = rayQueryGetIntersectionTEXT(query, true);
             vec3 hitPosition = origin + direction * distance;
             vec3 hitNormal = vfOrientHitNormal(

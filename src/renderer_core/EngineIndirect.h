@@ -178,7 +178,12 @@ struct ReprojectionResult
     std::uint32_t pixelX,
     std::uint32_t pixelY,
     std::uint32_t frameIndex,
-    IndirectSource& source) noexcept;
+    IndirectSource& source,
+    // Optional summary of what every bounce ray of this pixel hit. The
+    // diffuse bounce casts eight rays where the reflection casts one, and
+    // nothing reports their hits, so a contract cannot tell a shading
+    // disagreement from eight independent chances at an intersector one.
+    float* hitProbe = nullptr) noexcept;
 
 [[nodiscard]] const char* ToString(IndirectError error) noexcept;
 [[nodiscard]] const char* ToString(RejectReason reason) noexcept;

@@ -4928,3 +4928,64 @@ reflection hits, sub-primitive hit points, a fetch defect, the fetch
 infrastructure, and the radiance clamp. The reflection path is exonerated
 channel by channel. What is left is one path, one probe, and a decision about
 what an eight-ray exclusion is worth.
+
+## Why per-hit attributes cannot land, measured at last
+
+The bounce was the only unprobed path and the inference about it was right in
+kind and wrong by a factor of ten. Both sides now report a summary of what
+every bounce ray of a pixel found -- object and primitive, one number for all
+eight rays -- and the contract counts the pixels where the two summaries
+disagree:
+
+```text
+divergent-hits=0 divergent-bounces=9877 shadow-interior-mismatches=41
+```
+
+**Nine thousand eight hundred and seventy-seven of 41,981 interior pixels --
+23.5% -- have at least one bounce ray that hits different geometry on the
+device than in the reference.** The reflection, casting one ray, disagrees on
+0.28%. Eight rays over a hemisphere disagree on nearly a quarter of the frame.
+
+And the same run passes at 41 mismatches, because no attribute varies across
+a surface: a divergent ray hits a different triangle of the same object, reads
+the same flat per-object albedo, and shades to the same value. The
+disagreement is total and completely invisible.
+
+That is the whole thing, and it explains every measurement taken this session:
+
+- the hit point agrees to 5.1e-05, the fetched corner is bit-identical, the
+  interpolated colour agrees channel by channel to 5e-08 -- all true, all
+  about the *reflection* ray, all irrelevant
+- applying interpolation costs 159 pixels beyond the bound -- the small
+  fraction of those 9,877 where the differing triangles happen to differ
+  enough in colour to cross the tolerance
+- excluding divergent reflection hits fixes nothing, because 0.28% was never
+  the problem
+
+**So a per-hit attribute is not blocked by a defect. It is blocked by an
+arithmetic fact**: two intersectors sampling eight stochastic directions per
+pixel will not agree about a quarter of those pixels, and any attribute that
+varies within a surface makes every one of those disagreements visible.
+
+The options are now concrete rather than speculative, and none of them is
+free:
+
+- Exclude pixels with a divergent bounce. That is a quarter of the frame, and
+  a comparison over three-quarters of the interior is a different contract
+  from the one this phase has.
+- Compare the bounce statistically -- mean and variance over a region rather
+  than pixel for pixel -- which is what a stochastic estimator actually
+  supports and what phase 20's own accumulation contract already does for
+  histories.
+- Make the two intersectors agree, which means the reference tracing against
+  the device's structure rather than its own triangles. That is not a
+  tolerance change; it is a different reference.
+
+Which of those is right is a judgement about what the contract is for, not
+something another measurement settles. The probe stays and reports
+`divergent-bounces` without gating it: 23.5% is not a number to hide behind a
+bound, and if it moves, something has changed about how the two trace.
+
+Six candidates proposed for this disagreement and six eliminated before the
+seventh was found by probing the one path nobody had instrumented. The
+reflection path was measured exhaustively and was innocent throughout.

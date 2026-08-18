@@ -182,8 +182,10 @@ void main()
     vec3 indirect = vec3(0.0);
 #ifdef VF_RAY_QUERY
     uint indirectSource;
+    float indirectProbe = 0.0;
     indirect = vfIndirect(vertexCameraRelative, geometric, shaded,
-        uint(gl_FragCoord.x), uint(gl_FragCoord.y), 0u, indirectSource);
+        uint(gl_FragCoord.x), uint(gl_FragCoord.y), 0u, indirectSource,
+        indirectProbe);
 #endif
     vec3 surface = lit + emission + reflection + indirect;
     // A refractive surface splits between what it reflects and what it lets
@@ -239,15 +241,17 @@ void main()
     float reflectionSourceOut = 0.0;
     float reflectionHitOut = 0.0;
     float reflectionPrimitiveOut = 0.0;
+    float indirectProbeOut = 0.0;
 #ifdef VF_RAY_QUERY
     reflectionSourceOut = float(reflectionSource);
     reflectionHitOut = float(reflectionHitObject);
     reflectionPrimitiveOut = float(reflectionHitPrimitive);
+    indirectProbeOut = indirectProbe;
 #endif
     gbufferReactive = vec4(
         scenePush.blend == kVfBlendOpaque
             ? 0.0
             : vfReactiveMask(scenePush.blend,
                   vec4(surface, surfaceAlpha)),
-        reflectionSourceOut, reflectionHitOut, reflectionPrimitiveOut);
+        reflectionSourceOut, reflectionHitOut, indirectProbeOut);
 }

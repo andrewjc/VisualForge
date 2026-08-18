@@ -1602,6 +1602,7 @@ ScenePacketError RenderReferenceGBuffer(
                             // One bounce of diffuse indirect, over the same
                             // geometry the reflection traces.
                             std::array<float, 3> indirect{};
+                            float bounceProbe = 0.0f;
                             if (inputs.indirectEnabled &&
                                 !inputs.reflectionGeometry.empty()) {
                                 gi::SurfaceSample bounce{};
@@ -1618,8 +1619,10 @@ ScenePacketError RenderReferenceGBuffer(
                                     inputs.environment != nullptr
                                         ? *inputs.environment
                                         : lighting::GpuEnvironmentV1{},
-                                    x, y, 0, ignored);
+                                    x, y, 0, ignored, &bounceProbe);
                             }
+                            // What every bounce ray of this pixel found.
+                            destination.reserved[2] = bounceProbe;
                             auto& colour = hdr->pixels[
                                 static_cast<std::size_t>(y) * image.width + x];
                             for (std::size_t channel = 0; channel < 3;
