@@ -5343,3 +5343,58 @@ that the two copies agree. A test now reads the shader source and pins both:
 The roughness cutoff had the same exposure and was never checked either; it
 is pinned by the same test. 397 of 398 pass in both configurations, the one
 failure being the build probe against the updated game.
+
+## Cutout occluders: the any-hit path is wired, and what it exposed
+
+Phase 18 recorded that `RequiresAnyHit` and `ConfirmAlphaCandidate` were
+tested on the CPU and that "wiring an any-hit shader to them is outstanding".
+With ray query there is no any-hit shader: the equivalent is leaving the
+geometry non-opaque so traversal offers a *candidate*, and confirming it or
+not. Both halves are now in place.
+
+- The structure stops flagging every geometry `VK_GEOMETRY_OPAQUE_BIT_KHR`.
+  Alpha-tested geometry is left non-opaque, decided by the frame's own alpha
+  classification, and the geometry record carries a flag saying so.
+- The shadow ray stops passing `gl_RayFlagsOpaqueEXT`, which was overriding
+  the structure and committing geometry the shader was meant to test. Each
+  candidate goes through `vfCandidateOccludes`, which samples the alpha at
+  the candidate and applies **the same coverage rule and the same per-object
+  alpha record the raster pass uses** -- not a second alpha test.
+- The oracle samples the texture alpha at the candidate too. `ShadowTriangle`
+  had `alphaAtVertex`, which nothing ever wrote and which could not describe a
+  leaf with three corner values; it now carries the corner coordinates and the
+  texture, and falls back to the corner values when no texture is named.
+- `BuildOccluders` stops marking every occluder opaque and classifies from
+  the same records the backend reads.
+
+Measured with a cutout occluder in the family fixture: the shadow gained
+holes -- `shadowed-pixels` fell from 7199 to 5542 -- and the two sides agreed
+about them exactly, `shadow-interior-mismatches` going from 1429 to **0** and
+the max error from `0.43` to `0.00195`.
+
+### Why the fixture is not committed with it
+
+Classifying that occluder as alpha tested moves the *G-buffer* by exactly
+`25/255`, on 1494 interior pixels, **with nothing discarded at all**. Bisected:
+
+| fixture state | interior mismatches | G-buffer max error |
+| --- | --- | --- |
+| no visibility records (as before) | 0 | 0.00078 |
+| records present, every object opaque | 0 | 0.00078 |
+| one object tested, texture fully opaque | 1494 | 0.098 |
+| one object tested, one texel clear | 576 | 0.098 |
+
+So it is not the cut and not the presence of the records: an alpha-tested
+classification alone shades differently between device and reference, in the
+raster path, while `gbuffer-identity-mismatches` stays at 0 -- the two agree
+about which object covers every pixel and disagree about its value. The
+shadow half agrees exactly in the same runs, so this is not the any-hit work.
+
+`25/255` being exact points at an 8-bit quantised term rather than a
+filtering or interpolation difference. The fixture change is held back rather
+than committed failing, and the next step is to name which G-buffer field
+carries that difference -- the comparison reports only a maximum, so it needs
+a per-field breakdown before anything is changed.
+
+399 tests, 398 passing in both configurations, the one failure being the
+build probe against the updated game.

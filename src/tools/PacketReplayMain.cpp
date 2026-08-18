@@ -562,6 +562,10 @@ material::MaterialReplayBundle BuildFamilyMaterialFixture()
     material::MaterialReplayBundle bundle{};
     bundle.textures[0] = BuildQuadrantTexture(
         0x8000'0000'0000'1601ull,
+        // One texel of the four is clear. Only a surface classified as alpha
+        // tested consults it -- the coverage rule leaves an opaque surface
+        // alone whatever its alpha -- so this cuts the occluder and nothing
+        // else, and its shadow gets the shape of the texture.
         {{{255, 255, 255, 255}, {255, 190, 170, 255},
           {180, 255, 200, 255}, {190, 195, 255, 255}}},
         texture::TextureFormat::R8G8B8A8UnormSrgb);
@@ -1471,7 +1475,12 @@ texture::CapturedTexture BuildAlphaCutoutTexture()
 std::vector<accel::ShadowTriangle> BuildOccluders(
     const raster::DecodedPacket& projected,
     const std::span<const std::array<float, 3>> vertexPositions,
-    const std::span<const std::uint32_t> blendedDraws = {})
+    const std::span<const std::uint32_t> blendedDraws = {},
+    // The frame's own alpha classification and texture library. An occluder
+    // built opaque regardless casts the shadow of its triangle rather than of
+    // its texture, which is what a cutout is not.
+    const scene::ScenePacket* scenePacket = nullptr,
+    const std::span<const texture::CapturedTexture> textureLibrary = {})
 {
     std::vector<accel::ShadowTriangle> occluders;
     if (vertexPositions.size() != projected.vertices.size()) return occluders;
@@ -1513,9 +1522,45 @@ std::vector<accel::ShadowTriangle> BuildOccluders(
             triangle.a = vertexPositions[a];
             triangle.b = vertexPositions[b];
             triangle.c = vertexPositions[c];
-            // Opaque, matching VK_GEOMETRY_OPAQUE_BIT_KHR on the geometry the
-            // backend builds.
+            // Opaque unless the frame says otherwise, matching the geometry
+            // flag the backend sets from the same classification.
             triangle.opacity = accel::GeometryOpacity::Opaque;
+            if (scenePacket != nullptr) {
+                for (std::size_t objectIndex = 0;
+                     objectIndex < scenePacket->objects.size();
+                     ++objectIndex) {
+                    if (scenePacket->objects[objectIndex].drawIndex !=
+                        drawSlot) {
+                        continue;
+                    }
+                    if (objectIndex >= scenePacket->visibility.size()) break;
+                    const auto& visible =
+                        scenePacket->visibility[objectIndex];
+                    if (visible.alpha.classification !=
+                        visibility::AlphaClass::Tested) {
+                        break;
+                    }
+                    triangle.opacity = accel::GeometryOpacity::AlphaTested;
+                    triangle.alpha = visible.alpha;
+                    const std::array<std::size_t, 3> corners{a, b, c};
+                    for (std::size_t corner = 0; corner < 3; ++corner) {
+                        triangle.texCoord[corner][0] =
+                            projected.vertices[corners[corner]].texCoord[0];
+                        triangle.texCoord[corner][1] =
+                            projected.vertices[corners[corner]].texCoord[1];
+                    }
+                    for (const auto& candidate : projected.materials) {
+                        if (candidate.resourceId != draw.materialId) continue;
+                        if (candidate.textureIndex <
+                            textureLibrary.size()) {
+                            triangle.baseColor =
+                                &textureLibrary[candidate.textureIndex];
+                        }
+                        break;
+                    }
+                    break;
+                }
+            }
             occluders.push_back(triangle);
         }
     }
@@ -6131,7 +6176,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
                 }
             }
             occluders = BuildOccluders(projected, vertexPositions,
-                blendedDraws);
+                blendedDraws, &scenePacket, bundle.textures);
             inputs.occluders = occluders;
             inputs.indirectEnabled = false;
             scene::GBufferImage shadowedDirect;

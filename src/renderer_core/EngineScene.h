@@ -220,6 +220,10 @@ struct alignas(16) GpuGeometryRecordV1
 // emits 32-bit -- and reading one as the other walks a triangle list that
 // does not exist.
 inline constexpr std::uint32_t kGeometryIndexIs16Bit = 1u << 0;
+// Set when this geometry runs an alpha test, which is also when the structure
+// leaves it non-opaque so a query reports candidates instead of committing
+// them. Mirrors `kVfGeometryAlphaTested` in phase11/scene_layout.glsl.
+inline constexpr std::uint32_t kGeometryAlphaTested = 1u << 1;
 
 static_assert(sizeof(GpuGeometryRecordV1) == kGpuGeometryRecordSize);
 

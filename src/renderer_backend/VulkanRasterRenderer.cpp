@@ -3391,6 +3391,15 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
                 static_cast<std::int64_t>(
                     sizeof(raster::RasterVertexV3) / sizeof(float)));
         record.flags = indexIs16Bit ? scene::kGeometryIndexIs16Bit : 0u;
+        // An alpha-tested object is left non-opaque in the structure below,
+        // so the shader is asked about each candidate. The flag is what lets
+        // it tell "this geometry names no texture" from "this geometry runs
+        // no alpha test", which decide opposite things.
+        if (plan.objectIndex < scenePacket.visibility.size() &&
+            scenePacket.visibility[plan.objectIndex].alpha.classification ==
+                visibility::AlphaClass::Tested) {
+            record.flags |= scene::kGeometryAlphaTested;
+        }
         // Which texture shades a hit on this geometry. Resolved here because
         // the query reports no material, and the object's draw is the only
         // thing that names one.
@@ -3445,10 +3454,17 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
         const auto& plan = plans[index];
         auto& geometry = pendingBlasGeometries[index];
         geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        // Opaque here because this fixture carries no cutout occluders. A
-        // cutout would clear this flag and confirm candidates through the
-        // coverage rule, which is what accel::RequiresAnyHit decides.
-        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        // Cleared for a cutout, which is what makes traversal report a
+        // candidate instead of committing it so the shader can apply the
+        // coverage rule. `accel::RequiresAnyHit` decides this on captured
+        // geometry; here the frame's own alpha classification does, and the
+        // two agree because both read the same alpha class.
+        const auto alphaTested =
+            plan.objectIndex < scenePacket.visibility.size() &&
+            scenePacket.visibility[plan.objectIndex].alpha.classification ==
+                visibility::AlphaClass::Tested;
+        geometry.flags =
+            alphaTested ? 0u : VK_GEOMETRY_OPAQUE_BIT_KHR;
         auto& triangles = geometry.geometry.triangles;
         triangles.sType =
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;

@@ -376,8 +376,31 @@ ShadowResult TraceShadowRay(
 
         if (triangle.opacity == GeometryOpacity::AlphaTested) {
             ++result.alphaCandidates;
-            const auto sampled = (1.0f - u - v) * triangle.alphaAtVertex[0] +
+            // The texture at the candidate when the surface names one, which
+            // is what gives a cutout its own silhouette rather than a
+            // three-corner approximation of it. Sampled at level zero: a
+            // ray query has no derivatives, so the device can only do the
+            // same, and a shadow that picked a different mip from the
+            // surface would not match its own geometry.
+            auto sampled = (1.0f - u - v) * triangle.alphaAtVertex[0] +
                 u * triangle.alphaAtVertex[1] + v * triangle.alphaAtVertex[2];
+            if (triangle.baseColor != nullptr) {
+                const std::array<float, 3> weights{1.0f - u - v, u, v};
+                auto candidateU = 0.0f;
+                auto candidateV = 0.0f;
+                for (std::size_t corner = 0; corner < 3; ++corner) {
+                    candidateU +=
+                        weights[corner] * triangle.texCoord[corner][0];
+                    candidateV +=
+                        weights[corner] * triangle.texCoord[corner][1];
+                }
+                texture::SampledColor texel{};
+                if (texture::SampleTexture2D(*triangle.baseColor, candidateU,
+                        candidateV, 0.0f, texel) ==
+                    texture::TexturePacketError::None) {
+                    sampled = texel.a;
+                }
+            }
             // Confirmed through the coverage rule, not a second alpha test.
             if (!ConfirmAlphaCandidate(
                     triangle.alpha, sampled, pixelX, pixelY)) {

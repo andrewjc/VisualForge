@@ -178,6 +178,12 @@ struct GpuGeometryRecordV1
 // that does not exist.
 const uint kVfGeometryIndexIs16Bit = 1u;
 
+// Set when this geometry is alpha tested, which is also when the structure
+// leaves it non-opaque so a query reports candidates rather than committing
+// them. Without the flag the shader cannot tell "no texture, shade white"
+// from "no alpha test, always occlude".
+const uint kVfGeometryAlphaTested = 2u;
+
 layout(set = 0, binding = 18, std430) readonly buffer SceneGeometryObjects
 {
     GpuGeometryRecordV1 records[];

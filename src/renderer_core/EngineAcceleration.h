@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_core/EngineLighting.h"
+#include "renderer_core/EngineTexture.h"
 #include "renderer_core/EngineVisibility.h"
 
 #include <array>
@@ -242,6 +243,17 @@ struct ShadowTriangle
     // Consulted only for an alpha-tested triangle, through the Phase 15
     // coverage rule rather than a second alpha test.
     visibility::AlphaStateV1 alpha{};
+    // Where the alpha at a candidate comes from. A texture with the corner
+    // coordinates is what a cutout actually is -- three corner values cannot
+    // describe a leaf -- and it is what the device can reproduce at a
+    // ray-query candidate, having the same library and the same coordinates
+    // in its vertex stream.
+    //
+    // `alphaAtVertex` remains for a surface whose alpha is not a texture at
+    // all, and is what the interpolation falls back to when no texture is
+    // named.
+    std::array<std::array<float, 2>, 3> texCoord{};
+    const texture::CapturedTexture* baseColor{};
     std::array<float, 3> alphaAtVertex{1.0f, 1.0f, 1.0f};
 };
 

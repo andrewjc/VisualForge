@@ -141,9 +141,35 @@ void vfShadowRayForLight(
 }
 
 #ifdef VF_RAY_QUERY
-// Fully occluded or fully lit. The structure is built with every geometry
-// flagged opaque, so a committed hit is a real occlusion and the query can
-// stop at the first one instead of walking the whole ray.
+// Whether a ray-query candidate on this geometry actually blocks. The
+// structure leaves alpha-tested geometry non-opaque, so traversal reports it
+// as a candidate rather than committing it, and the shader decides -- through
+// the same coverage rule and the same per-object alpha record the raster pass
+// used, because a shadow silhouette disagreeing with the surface silhouette
+// is exactly the artefact this is for.
+//
+// Opaque geometry never arrives here: the structure commits it without asking.
+bool vfCandidateOccludes(GpuGeometryRecordV1 record, uint triangle, vec2 bary)
+{
+    if ((record.flags & kVfGeometryAlphaTested) == 0u) return true;
+    float sampledAlpha = 1.0;
+    if (record.textureIndex != 0xFFFFFFFFu) {
+        sampledAlpha = textureLod(sceneMaterialTextures[record.textureIndex],
+            vfHitTexCoord(record, triangle, bary), 0.0).a;
+    }
+    // Dithered against the pixel being shaded rather than the geometry being
+    // crossed: a dithered fade is a screen-space pattern, and the occluder's
+    // own coordinates would give the shadow a second one that swims with the
+    // light rather than sitting still on the surface.
+    return vfEvaluateCoverage(sceneVisibility.records[record.objectIndex],
+        sampledAlpha, uvec2(gl_FragCoord.xy)).covered;
+}
+
+// Fully occluded or fully lit. Opaque geometry commits without asking, so a
+// committed hit is a real occlusion and the query can stop at the first one
+// instead of walking the whole ray. Alpha-tested geometry is left non-opaque
+// by the structure and arrives as a candidate, which is what gives a cutout a
+// shadow shaped like its texture rather than like its triangle.
 float vfShadowTerm(GpuLightRecordV1 light, vec3 position, vec3 normal)
 {
     // Switched off for the frame, mirroring lighting::ShadeSurfaceGpu. Fully
@@ -161,13 +187,33 @@ float vfShadowTerm(GpuLightRecordV1 light, vec3 position, vec3 normal)
     if (!(maximumDistance > 0.0)) return 1.0;
 
     rayQueryEXT query;
+    // No `gl_RayFlagsOpaqueEXT`. Forcing every candidate opaque is what made
+    // a cutout cast the shadow of its bounding triangle: the flag overrides
+    // the structure and commits geometry the shader was meant to test.
     rayQueryInitializeEXT(query, sceneTlas,
-        gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+        gl_RayFlagsTerminateOnFirstHitEXT,
         0xFFu, origin, 0.0, direction, maximumDistance);
     // Looped rather than called once: rayQueryProceedEXT reports whether
     // traversal has more to do, and the spec only guarantees completion once
-    // it has returned false.
-    while (rayQueryProceedEXT(query)) {}
+    // it has returned false. Each pass may offer a candidate on non-opaque
+    // geometry, which only becomes an occlusion if it is confirmed.
+    while (rayQueryProceedEXT(query)) {
+        if (rayQueryGetIntersectionTypeEXT(query, false) !=
+            gl_RayQueryCandidateIntersectionTriangleEXT) {
+            continue;
+        }
+        uint candidateGeometry =
+            rayQueryGetIntersectionGeometryIndexEXT(query, false);
+        GpuGeometryRecordV1 candidateRecord =
+            sceneGeometryObjects.records[
+                candidateGeometry < sceneGeometryObjects.records.length()
+                    ? candidateGeometry : 0u];
+        if (vfCandidateOccludes(candidateRecord,
+                rayQueryGetIntersectionPrimitiveIndexEXT(query, false),
+                rayQueryGetIntersectionBarycentricsEXT(query, false))) {
+            rayQueryConfirmIntersectionEXT(query);
+        }
+    }
     if (rayQueryGetIntersectionTypeEXT(query, true) !=
         gl_RayQueryCommittedIntersectionNoneEXT) {
         return 0.0;

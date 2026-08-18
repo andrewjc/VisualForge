@@ -1,5 +1,6 @@
 #include "renderer_core/EngineAcceleration.h"
 #include "renderer_core/EngineLighting.h"
+#include "renderer_core/EngineTexture.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -633,4 +634,71 @@ TEST_CASE("P18_shadowing_darkens_direct_light_and_never_ambient",
     const auto absent = lighting::ShadeSurfaceGpu(
         environment, lights, albedo, position, normal, {});
     CHECK(absent[0] == Catch::Approx(unshadowed[0]));
+}
+
+TEST_CASE("P18_a_cutout_occluder_lets_light_through_its_transparent_texels",
+    "[phase18][accel]")
+{
+    // A cutout occluder's shadow has the shape of its texture, not of its
+    // triangle. `alphaAtVertex` could only ever carry three corner values, so
+    // a leaf casting a leaf-shaped shadow was out of reach and nothing ever
+    // wrote it. The alpha comes from the texture, sampled at the candidate --
+    // which is the same thing the device can do at a ray-query candidate, and
+    // the two must agree or the shadow silhouette leaves the surface.
+    texture::CapturedTexture cutout{};
+    cutout.resourceId = 0x1800'0000'0000'0051ull;
+    cutout.generation = 1;
+    cutout.width = 2;
+    cutout.height = 1;
+    cutout.resourceFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    cutout.viewFormat = texture::TextureFormat::R8G8B8A8Unorm;
+    cutout.sampler.minFilter = texture::TextureFilter::Nearest;
+    cutout.sampler.magFilter = texture::TextureFilter::Nearest;
+    cutout.sampler.mipFilter = texture::TextureFilter::Nearest;
+    cutout.sampler.maxLod = 0.0f;
+    texture::TextureSubresource level{};
+    level.width = 2;
+    level.height = 1;
+    level.rowPitch = 8;
+    level.slicePitch = 8;
+    level.bytes.resize(8);
+    // Left texel opaque, right texel clear.
+    const std::array<std::uint8_t, 8> texels{
+        255, 255, 255, 255, 255, 255, 255, 0};
+    for (std::size_t byte = 0; byte < texels.size(); ++byte) {
+        level.bytes[byte] = static_cast<std::byte>(texels[byte]);
+    }
+    cutout.subresources.push_back(level);
+
+    accel::ShadowTriangle triangle{};
+    triangle.a = {-2.0f, -2.0f, 1.0f};
+    triangle.b = {4.0f, -2.0f, 1.0f};
+    triangle.c = {-2.0f, 4.0f, 1.0f};
+    triangle.opacity = accel::GeometryOpacity::AlphaTested;
+    triangle.alpha.source = visibility::AlphaSource::BaseColorTexture;
+    triangle.alpha.classification = visibility::AlphaClass::Tested;
+    triangle.alpha.reference = 0.5f;
+    triangle.baseColor = &cutout;
+    // The first corner sits in the opaque texel, the second in the clear one.
+    triangle.texCoord = {{{0.25f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}}};
+    const std::array<accel::ShadowTriangle, 1> triangles{triangle};
+
+    // Straight through the opaque half: blocked.
+    accel::ShadowRay opaqueSide{};
+    opaqueSide.origin = {-1.9f, -1.9f, 0.0f};
+    opaqueSide.direction = {0.0f, 0.0f, 1.0f};
+    opaqueSide.maximumDistance = 10.0f;
+    const auto blocked = accel::TraceShadowRay(triangles, opaqueSide, 0, 0);
+    CHECK(blocked.occluded);
+    CHECK(blocked.alphaCandidates == 1);
+
+    // And through the clear half: the light gets through, and the candidate
+    // is still counted so the traversal is visible rather than silent.
+    accel::ShadowRay clearSide{};
+    clearSide.origin = {3.0f, -1.9f, 0.0f};
+    clearSide.direction = {0.0f, 0.0f, 1.0f};
+    clearSide.maximumDistance = 10.0f;
+    const auto passed = accel::TraceShadowRay(triangles, clearSide, 0, 0);
+    CHECK_FALSE(passed.occluded);
+    CHECK(passed.alphaCandidates == 1);
 }
