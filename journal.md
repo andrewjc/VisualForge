@@ -4702,3 +4702,51 @@ reported a clean zero, and the next attempt at a per-hit attribute would have
 failed for reasons that looked unrelated.
 
 The three items are not implemented by this. What they were missing is.
+
+## The mask does not unblock the interpolation, and why that is worth knowing
+
+The hit-identity mask was built on the reasoning that a per-hit attribute
+fails because the two intersectors hit different things. With it in place the
+stashed vertex-colour interpolation was re-applied and measured:
+
+```text
+divergent-hits=117 shadow-interior=41864 shadow-interior-mismatches=200
+shadow-interior-max-error=0.0357
+```
+
+**117 pixels excluded, 200 still mismatching against a bound of 41.** The mask
+removes the pixels it was built to remove and the comparison still fails, so
+the reasoning behind it was wrong: the disagreement is not mostly about which
+primitive was hit.
+
+That is the fifth performance-or-correctness hypothesis this session to be
+wrong, and like the others it is more useful wrong than it would have been
+untested. The divergence is **sub-primitive**: both sides hit the same
+triangle of the same object and disagree about *where on it*. A per-object
+mask sees nothing, a per-primitive mask sees 117, and neither reaches the
+cause.
+
+The cause follows from something recorded earlier and not connected until now.
+The bottom level is built from the packet's vertices with each geometry's
+transform applied *at build time*, and the anchoring change added a further
+offset to that transform. The oracle transforms its own copy of the same
+vertices separately. So the two are not intersecting the same triangles: they
+are intersecting two independently-computed floating-point approximations of
+them, and a hit point that differs by a fraction of a unit gives barycentrics
+that differ by a fraction of a per cent. That is invisible while a hit shades
+to one value for the whole surface and proportional to the gradient the moment
+it does not.
+
+So the specified prerequisite was wrong, and the real one is narrower: **both
+sides must intersect bit-identical triangle data.** The oracle would have to
+read the same anchored, transformed vertices the structure was built from,
+in the same order of operations, rather than deriving its own. That is a
+concrete change to `ProjectScenePacket` and `BuildReflectionGeometry` and it is
+not a tolerance.
+
+The mask is kept. It is correct, it is bounded at one per cent of the
+interior, and it costs nothing -- and it now measures something real: 117
+pixels where the two structures genuinely disagree about which triangle a ray
+found. If that number moves, the two have diverged. What it does not do is
+license an interpolated attribute, and the phase 19 document now says so
+rather than implying the prerequisite is met.

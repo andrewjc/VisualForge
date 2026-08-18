@@ -225,3 +225,24 @@ meant. Restoring the `tintColor` albedo also fails it.
   that would make a fetch possible are the next step.
 - **No temporal or spatial filtering**, one sample per pixel, and no probe
   capture. Unchanged from the list above.
+
+## What the hit-identity mask settled, and what it did not
+
+The contract now reports and excludes pixels where the device and the oracle
+disagree about which geometry *and primitive* a reflection ray found, bounded
+at one per cent of the interior so the exclusion cannot grow into a way of not
+comparing the picture. On this fixture it excludes 117 of 41,981.
+
+It does **not** make an interpolated per-hit attribute landable. Measured with
+the vertex-colour interpolation re-applied: 117 excluded and 200 still
+mismatching against a bound of 41. The disagreement is sub-primitive -- the
+same triangle, a different point on it -- because the bottom level is built
+from vertices transformed at build time while the oracle transforms its own
+copy separately, so the two intersect independently-computed approximations of
+the same triangles.
+
+The prerequisite for texture fetch at a hit, for interpolated attributes, and
+for more than one sample per pixel is therefore narrower than previously
+recorded here: both sides must intersect **bit-identical** triangle data. That
+is a change to how the reference derives its geometry, not a tolerance and not
+a mask.
