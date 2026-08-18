@@ -682,6 +682,15 @@ DrawStreamError AssembleSceneGeometry(
                 } else {
                     ++slot.verticesWithoutNormals;
                 }
+                if (value.color[0] < 0.99f || value.color[1] < 0.99f ||
+                    value.color[2] < 0.99f) {
+                    ++slot.verticesTinted;
+                }
+                if (value.color[0] < 0.05f &&
+                    std::abs(value.color[1] - value.color[2]) < 0.02f &&
+                    value.color[1] > 0.4f) {
+                    ++slot.verticesCyanSignature;
+                }
                 if (decodeNeeded) rasterPacket.vertices.push_back(value);
             }
             if (decodeNeeded) {
@@ -697,6 +706,8 @@ DrawStreamError AssembleSceneGeometry(
             // which is the work being avoided.
             result.verticesWithNormals += slot.verticesWithNormals;
             result.verticesWithoutNormals += slot.verticesWithoutNormals;
+            result.verticesTinted += slot.verticesTinted;
+            result.verticesCyanSignature += slot.verticesCyanSignature;
 
             raster::RasterMaterialV1 material{};
             material.resourceId = keptObjects[index].materialId;

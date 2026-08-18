@@ -294,6 +294,13 @@ struct GeometryArena
         // reports the same totals a freshly decoded one does.
         std::uint64_t verticesWithNormals{};
         std::uint64_t verticesWithoutNormals{};
+        std::uint64_t verticesTinted{};
+        std::uint64_t verticesCyanSignature{};
+    // Vertices whose decoded colour is not white, and the subset carrying the
+    // exact signature seen on screen: red at zero with green and blue equal.
+    // Twelve percent of a mirrored frame is a flat (0,188,188), which is not a
+    // colour any albedo texture produces, so the question is whether the
+    // vertex stream is carrying it or the sampler is.
     };
 
     std::unordered_map<std::uint64_t, Slot> slots;
@@ -338,8 +345,14 @@ struct AssemblyResult
     // which half of the pipeline to look in.
     std::uint64_t verticesWithNormals{};
     std::uint64_t verticesWithoutNormals{};
+    // Vertices whose decoded colour is not white, and the subset carrying the
+    // exact signature seen on screen: red at zero with green and blue equal.
+    // Twelve percent of a mirrored frame is a flat (0,188,188), which is not a
+    // colour any albedo texture produces, so the question is whether the
+    // vertex stream carries it or the sampler does.
+    std::uint64_t verticesTinted{};
+    std::uint64_t verticesCyanSignature{};
 };
-
 // Concatenates the cached meshes into one self-contained raster packet and
 // narrows the scene packet to the objects that packet can actually draw.
 // Both are rewritten together: a scene object whose draw index no longer

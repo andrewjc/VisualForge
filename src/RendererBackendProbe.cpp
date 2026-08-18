@@ -2154,12 +2154,15 @@ bool CompositeMirrorImpl(
     }
     if (liveScene != s_mirrorLiveLogged) {
         log::Write("renderer-mirror: source=live-scene objects=%u missing=%u "
-            "vertices=%llu indices=%llu normals=%llu no-normals=%llu",
+            "vertices=%llu indices=%llu normals=%llu no-normals=%llu "
+            "tinted=%llu cyan=%llu",
             assembly.drawnObjects, assembly.missingMeshes,
             static_cast<unsigned long long>(assembly.vertices),
             static_cast<unsigned long long>(assembly.indices),
             static_cast<unsigned long long>(assembly.verticesWithNormals),
-            static_cast<unsigned long long>(assembly.verticesWithoutNormals));
+            static_cast<unsigned long long>(assembly.verticesWithoutNormals),
+            static_cast<unsigned long long>(assembly.verticesTinted),
+            static_cast<unsigned long long>(assembly.verticesCyanSignature));
         s_mirrorLiveLogged = liveScene;
     }
 
