@@ -4793,3 +4793,45 @@ Three specifications of this prerequisite, two of them confident and written
 down, and the measurement that settled it cost one temporary lane and one
 contract run. The pattern is the same one this session keeps producing: the
 inference was plausible, the measurement was cheap, and they disagreed.
+
+## Two causes eliminated, and the interpolation disagreement is still unlocated
+
+Having refuted the sub-primitive story, the remaining candidate was a defect in
+the attribute fetch: the device recovers corner colours through offsets this
+renderer computes itself, and reading from the wrong place produces real
+floats from the wrong vertices. That was written here as the next step.
+
+It is also wrong. Both sides were made to report the corner attribute they
+*fetched*, rather than the colour they shaded, and differenced on pixels where
+they agree about what they hit:
+
+```text
+divergent-hits=0 fetch-delta=0
+```
+
+**Bit-identical, on every pixel.** The vertex fetch reads exactly the vertex
+the reference reads. So the offsets, the sixteen-bit index unpacking and the
+per-geometry table are all correct, and the disagreement is not there either.
+
+Where that leaves it, stated as what is known rather than what is suspected:
+
+- The two intersectors agree about the hit point to `5.1e-05` units.
+- They agree about which object and which primitive on all but 117 of 41,981
+  interior pixels, and those are excluded and counted.
+- They fetch bit-identical corner attributes.
+- With interpolation active the interior comparison still fails, by more than
+  the excluded pixels account for.
+
+Three causes proposed, three eliminated by measurement, and the disagreement
+is real and unlocated. The next probe is the one this round set up and failed
+to complete: report the *interpolated* value from each side rather than the
+fetched corner, which separates "the weights differ" from "the weights are
+applied to different corners". Half of that probe did not apply and the result
+was inconclusive, so it is not recorded as evidence.
+
+What is worth carrying forward is the cost asymmetry. Each of these probes was
+a temporary lane and one contract run. Each of the three hypotheses they killed
+would have been hours of work -- a mask keyed on the wrong identity, an
+architectural change to how the reference derives geometry, and a hunt through
+correct offset arithmetic. The instrument is cheap and the theory is expensive,
+which has been true every time this session.
