@@ -312,3 +312,60 @@ mutation fail rather than pass quietly.
 
 Mutation-verified: restoring the hardcoded white sample fails
 `contract.family_scene_frame`.
+
+## The corpus sweep
+
+Run against `Fallout4 - Materials.ba2` with
+`vf_packet_replay --sweep-materials <path>`. It needed three pieces this
+renderer did not have -- a BA2 GNRL reader, a complete DEFLATE and zlib
+decompressor, and a parser for BGSM and BGEM -- all of which are tested
+against synthetic fixtures, since the sweep itself reads the installed game
+and cannot be a ctest.
+
+**6899 entries, 6899 extracted, 6899 parsed exactly.** The parser requires
+each file to be consumed to the byte. That is the load-bearing check: a field
+order that is wrong but self-consistent reads every field without complaint
+and simply stops in the wrong place, so "it parsed" would not distinguish a
+correct layout from a plausible one. Two layouts landing exactly on the end
+for 6899 files is the evidence.
+
+| family | count | share |
+| --- | --- | --- |
+| Default | 3991 | 57.8% |
+| EnvironmentMap | 2356 | 34.2% |
+| None (effect materials) | 283 | 4.1% |
+| GlowMap | 151 | 2.2% |
+| TreeAnimation | 60 | 0.9% |
+| SkinTint | 20 | 0.3% |
+| HairTint | 18 | 0.3% |
+| Face | 12 | 0.2% |
+| Eye | 8 | 0.1% |
+
+Nine of twenty-three families occur, and two are 92% of the corpus. The
+absent ones are not a gap: Landscape, Snow, LodLandscape and the rest are
+selected by the engine from geometry and region data rather than from a
+material file, so a material archive cannot hold them.
+
+A material declares several of these at once, so the table is a stated rule
+applied to the flags, most specific first. The flags are reported alongside
+it and stay meaningful if the rule changes: `environment-mapping=2533`,
+`specular-enabled=6149`, `alpha-test=1892`, `two-sided=913`,
+`alpha-blend=611`, `subsurface-lighting=429`, `non-occluder=381`,
+`decal=530`, `glowmap=154`, `emit-enabled=157`.
+
+### It answers two other items on this page
+
+The sweep counts authored texture slots, which settles two deferrals that
+rested on the data not existing:
+
+- **The greyscale-to-palette ramp is authored in the corpus** -- 287
+  materials fill slot 3, and 319 declare the flag. The note above says
+  applying a palette "would mean inventing a ramp"; it would not. The ramp is
+  missing from the *recorded role IDs*, not from the game, which is a capture
+  gap and a much smaller one.
+- **POM has real height data** -- 58 materials author a displacement map.
+  0.8% of the corpus, but the march would run against authored data rather
+  than a synthetic fixture.
+
+And one that argues the other way: `inner-layer=4`. Multi-layer parallax is
+effectively absent and does not earn a shader path on this evidence.
