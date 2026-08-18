@@ -164,8 +164,18 @@ named rather than implied by omission:
   history resource exists yet, so a rough reflection is one raw sample per
   pixel and will be noisy. The plan's convergence and ghosting gate cannot be
   claimed until the filter exists.
-- **One sample per pixel.** `ReflectionPolicy::samplesPerPixel` is carried and
-  honoured by the oracle but the shader traces once.
+- **One sample per pixel, and `samplesPerPixel` is honoured by nothing.** This
+  document said the oracle honoured it and only the shader traced once.
+  Checked: the field is read by no code at all -- `EvaluateReflection` takes a
+  single sample and averages nothing, and no caller loops. The claim was
+  written from the field's existence rather than from its use.
+
+  Wiring it is not just a loop. Both sides would draw from `SampleSequence`,
+  which is mirrored and would agree, but every extra sample is another traced
+  ray, and averaging N of them multiplies the pixels where the oracle and the
+  hardware intersector legitimately disagree against bounds set for one. It
+  wants the same prerequisite the per-hit attribute work wants: a comparison
+  that excludes pixels whose hit geometry differs between the two.
 - **No probe capture.** The probe path is implemented, tested, and exercised
   by the oracle, but nothing captures a probe from the engine yet, so the
   fixture runs with `probeAvailable` false and interiors resolve to

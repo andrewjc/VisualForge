@@ -61,6 +61,23 @@ struct ReflectionPolicy
     float maximumDistance{4096.0f};
     // A ray shorter than this cannot leave the surface it started on.
     float minimumDistance{0.0f};
+    // Declared and honoured by nothing, on either side.
+    //
+    // This is stated here because the phase document claimed the oracle
+    // honoured it and only the shader traced once, and that was not true:
+    // `EvaluateReflection` takes one sample and averages nothing, and no
+    // caller loops. A field the contract carries and no evaluation reads is
+    // exactly the shape of a declaration that looks implemented.
+    //
+    // Wiring it is not just a loop. Both sides would draw from
+    // `SampleSequence`, which is mirrored and would agree, but each extra
+    // sample is another traced ray, and a ray-triangle decision at an edge is
+    // not bit-identical between this oracle and the hardware intersector.
+    // Averaging N of them multiplies the pixels where the two legitimately
+    // disagree, against bounds that were set for one. That is the same wall
+    // the per-hit attribute work ran into, and it wants the same thing first:
+    // a comparison that can exclude pixels whose hit geometry differs between
+    // the two, the way the silhouette comparison already excludes edges.
     std::uint32_t samplesPerPixel{1};
     // Growth added to a cone's spread by the pixel footprint itself, in
     // radians per pixel. Zero would make every mip selection pick mip 0 and
