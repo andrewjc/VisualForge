@@ -364,6 +364,12 @@ constexpr const char* kMirrorLightBufferName = "cbVolume";
 // the same light keeps the same identity from frame to frame.
 constexpr std::uint64_t kMirrorSunLightId = 0x53554E0000000001ull;
 constexpr std::uint64_t kMirrorMoonLightId = 0x4D4F4F4E00000001ull;
+// Which half of the diffuse-bounce A/B this window is rendering.
+bool s_mirrorIndirectDisabled = false;
+std::uint64_t s_mirrorIndirectOnUs = 0;
+std::uint64_t s_mirrorIndirectOffUs = 0;
+std::uint64_t s_mirrorIndirectOnFrames = 0;
+std::uint64_t s_mirrorIndirectOffFrames = 0;
 // The frame's light packet, empty whenever the sun could not be resolved.
 // Empty is a real answer: the backend then has no environment and leaves the
 // albedo alone, which is correct behaviour for a session whose volumetric
@@ -593,6 +599,19 @@ void BuildMirrorLighting()
 
     lighting::LightPacket packet{};
     packet.environment = record;
+    // Alternated so one run measures both states.
+    //
+    // The mirror presents a world frame at about eleven a second, and
+    // `render-us` is nearly all of it. The diffuse bounce traces eight rays a
+    // pixel against a structure holding every drawn object, so it is the first
+    // suspect -- but a suspect is not a measurement, and the term cannot be
+    // separated by reading the frame time with it switched on. Switching it
+    // between windows and reporting both means costs one run instead of two
+    // and compares them under the same cell, the same camera and the same
+    // resident set.
+    if (s_mirrorIndirectDisabled) {
+        packet.environment.flags |= lighting::EnvironmentIndirectDisabled;
+    }
     // As a light, not only as environment metadata. The shading reads the
     // ambient term and the light list; the environment's own sunDirection and
     // sunColor are carried for provenance but nothing evaluates them, so a
@@ -2513,9 +2532,35 @@ bool CompositeMirrorImpl(
     status.structSize = sizeof(status);
     const auto renderStarted = std::chrono::steady_clock::now();
     const auto renderOk = s_host.RenderRasterFrame(request, status);
-    s_stageRenderUs += static_cast<std::uint64_t>(
+    const auto renderUs = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - renderStarted).count());
+    s_stageRenderUs += renderUs;
+    // Attributed to whichever half of the A/B this frame rendered under, and
+    // switched in windows rather than per frame so the swapchain, the resident
+    // set and the acceleration structure all settle before either mean is
+    // taken.
+    if (s_mirrorIndirectDisabled) {
+        s_mirrorIndirectOffUs += renderUs;
+        ++s_mirrorIndirectOffFrames;
+    } else {
+        s_mirrorIndirectOnUs += renderUs;
+        ++s_mirrorIndirectOnFrames;
+    }
+    if ((s_mirrorIndirectOnFrames + s_mirrorIndirectOffFrames) % 120 == 0) {
+        s_mirrorIndirectDisabled = !s_mirrorIndirectDisabled;
+        if (s_mirrorIndirectOnFrames >= 240 &&
+            s_mirrorIndirectOffFrames >= 240) {
+            log::Write("renderer-indirect-ab: on-frames=%llu on-mean-us=%llu "
+                "off-frames=%llu off-mean-us=%llu",
+                static_cast<unsigned long long>(s_mirrorIndirectOnFrames),
+                static_cast<unsigned long long>(
+                    s_mirrorIndirectOnUs / s_mirrorIndirectOnFrames),
+                static_cast<unsigned long long>(s_mirrorIndirectOffFrames),
+                static_cast<unsigned long long>(
+                    s_mirrorIndirectOffUs / s_mirrorIndirectOffFrames));
+        }
+    }
     if (!renderOk) {
         if (!s_mirrorRenderFaultLogged) {
             log::Write(

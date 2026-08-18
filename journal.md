@@ -4305,3 +4305,37 @@ The sort was reverted once on the mistaken conclusion that it had broken them,
 after a rebuild that had not actually happened. Re-running it against a clean
 tree is what separated "the sort breaks these tests" from "these tests assume
 an order" -- and only one of those is a reason not to sort.
+
+## A third of the frame is the diffuse bounce, measured
+
+The mirror presents a world frame for the first time, and it costs about
+100 ms. `prepare-us` is 0.27 ms and `upload-us` is 0.07 ms, so nothing about
+building or shipping the packet is the problem; `render-us` is nearly all of
+it and `gpu-wait` is nearly all of that.
+
+The diffuse bounce was the first suspect -- eight rays a pixel at 1280x720 is
+7.4 million rays a frame against a structure holding every drawn object -- but
+a suspect is not a measurement, and the term cannot be separated by reading a
+frame time with it switched on. `EnvironmentIndirectDisabled` already existed
+so a contract could render without it, so the mirror now alternates it in
+120-frame windows and reports both means. One run, both numbers, the same cell
+and the same camera under each.
+
+```text
+renderer-indirect-ab: on-frames=720 on-mean-us=102647 off-frames=720 off-mean-us=68475
+```
+
+**34 ms of a 103 ms frame, or a third of it.** Without the bounce the mirror
+runs at about 14.6 frames a second instead of 9.7.
+
+That is not an argument for removing it. It is the concrete motivation for
+Phase 20's outstanding half: `ReflectionHistoryKey`, `ResetHistory` and the
+half-resolution mapping are all implemented and tested on the CPU precisely so
+that fewer rays can be traced and reconstructed, and none of them has a
+history resource on the device yet. Eight raw samples a pixel every frame is
+what a renderer does when it has no temporal reconstruction, and the cost of
+not having it is now a number rather than an assumption.
+
+Windows rather than alternate frames, so the swapchain, the resident set and
+the acceleration structure all settle before either mean is taken. The first
+report is withheld until both halves have 240 frames, for the same reason.
