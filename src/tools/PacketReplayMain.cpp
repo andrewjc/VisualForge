@@ -567,7 +567,7 @@ material::MaterialReplayBundle BuildFamilyMaterialFixture()
         // alone whatever its alpha -- so this cuts the occluder and nothing
         // else, and its shadow gets the shape of the texture.
         {{{255, 255, 255, 255}, {255, 190, 170, 255},
-          {180, 255, 200, 255}, {190, 195, 255, 255}}},
+          {180, 255, 200, 255}, {190, 195, 255, 0}}},
         texture::TextureFormat::R8G8B8A8UnormSrgb);
     bundle.textures[1] = BuildSolidTexture(
         0x8000'0000'0000'1602ull, kFamilyNormalTexel);
@@ -5821,6 +5821,7 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
         std::cerr << "family-replay: shadow fixture failed\n";
         return 5;
     }
+if (options.shadows) {        scenePacket.visibility.clear();        for (std::size_t index = 0; index < scenePacket.objects.size();             ++index) {            visibility::VisibilityRecordV1 record{};            record.objectId = scenePacket.objects[index].objectId;            record.materialId = scenePacket.objects[index].materialId;            record.alpha.constantAlpha = 1.0f;            record.alpha.fade = 1.0f;            record.modelDeterminant = 1.0f;            record.faceMode = visibility::FaceMode::FrontOnly;            record.alpha.classification = visibility::AlphaClass::Opaque;            record.alpha.source = visibility::AlphaSource::None;            if (scenePacket.objects[index].drawIndex == kSceneObjectCount) {                record.alpha.classification = visibility::AlphaClass::Tested;                record.alpha.source =                    visibility::AlphaSource::BaseColorTexture;                record.alpha.reference = 0.5f;            }            scenePacket.visibility.push_back(record);        }    }
     // After the shadow fixture, because both append objects and each takes
     // the next free draw index. Appending in the other order gives two
     // objects the same one, and the scene is refused for a duplicate draw.
@@ -7668,6 +7669,8 @@ int RenderFamilyScene(const FamilyRenderOptions& options)
               << " lobe-differs=" << (lobeDiffers ? "yes" : "no")
               << " gbuffer-identity-mismatches="
               << comparison.identityMismatches
+              << " gbuffer-worst-object=" << std::hex
+              << comparison.worstObjectId << std::dec
               << " gbuffer-worst-want=" << comparison.worstExpected
               << " gbuffer-worst-got=" << comparison.worstActual
               << " gbuffer-worst-plane=" << comparison.worstGroup

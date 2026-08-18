@@ -532,6 +532,12 @@ struct VulkanRasterRenderer::Impl
     // Phase 16: one pipeline for all eight shader classes. What differs
     // between families is record data, not a technique permutation.
     VkPipeline familyScenePipeline{VK_NULL_HANDLE};
+    // The family shader with the alpha colour pass's depth state. Without it
+    // an alpha-tested surface was shaded by phase15's scene shader, which
+    // predates the material families and reads no normal map, no glow map and
+    // no family record -- so classifying an object as a cutout silently took
+    // its material away.
+    VkPipeline familyAlphaScenePipeline{VK_NULL_HANDLE};
     // One per blended mode, indexed by blend::BlendMode minus one. Blend
     // factors are pipeline state in core Vulkan, so a single pipeline cannot
     // serve additive and multiply.
@@ -989,7 +995,7 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
             terrainPipeline = VK_NULL_HANDLE;
         }
         for (auto* pipeline : {&alphaScenePipeline, &alphaDepthPipeline,
-            &familyScenePipeline}) {
+            &familyScenePipeline, &familyAlphaScenePipeline}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device, *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -2209,6 +2215,19 @@ abi::Result VulkanRasterRenderer::Impl::CreatePipelines() noexcept
         cleanupModules();
         return abi::Result::RasterCreateFailed;
     }
+
+    // The same shader again against the depth the prepass wrote, so a cutout
+    // is shaded by the family it declares rather than by the pass that
+    // happens to draw it. The coverage test is already in that shader -- it
+    // discards on it -- so nothing about the silhouette changes.
+    pipelineInfo.pDepthStencilState = &alphaColorDepth;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+            &pipelineInfo, nullptr, &familyAlphaScenePipeline) !=
+        VK_SUCCESS) {
+        cleanupModules();
+        return abi::Result::RasterCreateFailed;
+    }
+    pipelineInfo.pDepthStencilState = &alphaDepthStencil;
 
     // One pipeline per blend mode. Blend factors are pipeline state rather
     // than dynamic state in core Vulkan, so a single pipeline cannot serve
@@ -5759,8 +5778,15 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
         // Same geometry and state as the prepass, differing only in the
         // bound pipeline, which tests EQUAL against the depth it wrote.
         beginRegion("phase15.alpha-tested", {0.95f, 0.55f, 0.15f, 1.0f});
+        // The family shader when the frame has families, so a cutout keeps
+        // its normal map, its glow and its family record. Shading it with
+        // phase15's scene shader instead read none of those: an object lost
+        // its material by being classified a cutout, which showed up as a
+        // shading normal of zero against the reference's decoded 0.098.
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            alphaScenePipeline);
+            phase11SceneActive && phase16FamilyActive
+                ? familyAlphaScenePipeline
+                : alphaScenePipeline);
         const auto alphaResult = RecordAlphaDraws(packet, layout,
             alphaObjects, false);
         endRegion();

@@ -1779,6 +1779,10 @@ GBufferComparison CompareGBuffer(
                             static_cast<std::uint32_t>(channel);
                         comparison.worstExpected = leftChannels[group][channel];
                         comparison.worstActual = rightChannels[group][channel];
+                        comparison.worstObjectId =
+                            static_cast<std::uint64_t>(left.objectId[0]) |
+                            (static_cast<std::uint64_t>(left.objectId[1])
+                                << 32);
                     }
                     totalError += error;
                     differs = differs || error != 0.0f;

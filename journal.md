@@ -5433,3 +5433,53 @@ texel read without its decode on one side, and it is where the next
 investigation starts. The cutout fixture stays out of the tree until it is
 resolved; the wiring it exercises is already committed and the shadow half of
 it agrees exactly.
+
+### The blocker was a real defect: a cutout lost its material
+
+The 25/255 delta is found, and it was not a fixture problem. Traced by the
+diagnostics added for it: plane 2 channel 0 is the shading normal's X, the
+worst pixel belongs to object `...1104` -- the occluder itself -- and
+`0.0980393` is exactly what `kFamilyNormalTexel`'s red byte of 140 decodes to
+through `2x-1`. The reference was applying the occluder's normal map and the
+device was not.
+
+The cause: **an alpha-tested surface was shaded by `phase15/alpha_scene.frag`**.
+The colour pass for alpha objects binds `alphaScenePipeline`, which predates
+the material families and reads no family record, no normal map and no glow
+map. Classifying an object as a cutout therefore took its material away, in
+silence, and nothing noticed because no fixture had ever classified a
+family-shaded object as a cutout.
+
+That is not a fixture-only concern. Foliage, fences, ladders and grates are
+cutouts, and every one of them would have been shaded without its normal map
+in the mirrored frame.
+
+The fix is a second pipeline built from the *family* shader with the alpha
+colour pass's depth state. The coverage test already lives in that shader --
+it discards on it -- so the silhouette is unchanged; only the shading it
+reaches is. `interior-mismatches` goes from 1494 to **0** and the G-buffer
+error from `0.098` back to `0.00078`, which is the value the frame had before
+any cutout existed.
+
+### The cutout occluder, end to end
+
+With the defect fixed the fixture lands. The occluder is cut, its shadow is
+cut, and the two sides agree about both:
+
+- surface: `occluder-pixels=761` against `expected-occluder-pixels=761`, down
+  from 1715 -- 954 pixels of the triangle removed by the texture, identically
+  on both sides
+- shadow: `shadowed-pixels` 7199 to 5542, `shadow-interior-mismatches=0`,
+  max error `0.00195`
+- raster: `interior-mismatches=0`, `gbuffer-max-error=0.00078`
+
+| mutation | shadow mismatches | verdict |
+| --- | --- | --- |
+| none | 0 | pass |
+| candidate always occludes | 1519 | **fail** |
+| structure keeps the geometry opaque | 1519 | **fail** |
+| oracle ignores the texture alpha | 1429 | **fail** |
+
+Both halves are held: the device must ask about the candidate and the
+structure must let it, and the reference must sample the same texture. 398 of
+399 in both configurations.

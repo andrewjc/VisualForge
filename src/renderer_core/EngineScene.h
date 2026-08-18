@@ -297,6 +297,9 @@ struct GBufferComparison
     std::uint32_t worstChannel{};
     float worstExpected{};
     float worstActual{};
+    // Which object owned the worst pixel. "Some pixels differ" is not a lead;
+    // "this object's pixels differ" is.
+    std::uint64_t worstObjectId{};
     std::uint64_t comparedPixels{};
     std::uint64_t differingPixels{};
     std::uint64_t identityMismatches{};
