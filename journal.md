@@ -5634,3 +5634,44 @@ the shader and in the mirror beside the code rather than left to be
 discovered.
 
 413 tests, 412 passing in both configurations.
+
+## The four remaining Phase 17 and 20 items are one change, not four
+
+Worth recording before anyone plans them separately, because they read as
+independent gaps and are not.
+
+Phase 20 lists three: no GPU history for temporal accumulation, no spatial
+filtering, and half resolution implemented but not wired. Phase 17 lists
+deferred shading. All four are blocked on the same thing, and it is
+structural rather than missing code.
+
+Indirect light is traced **inside the forward fragment shader**.
+`family_scene.frag` calls `vfIndirect` per fragment, and there is no
+screen-space pass over the G-buffer anywhere in the backend. That placement is
+what blocks each of them:
+
+- **Temporal history** needs a per-pixel read-modify-write of the previous
+  frame's accumulation. From a fragment shader that is a race: two fragments
+  covering the same pixel -- which overdraw guarantees -- would accumulate
+  into the same history slot in an order the API does not define.
+- **Spatial filtering** needs neighbouring pixels' results, which a fragment
+  shader cannot see because they may not exist yet.
+- **Half resolution** needs one trace shared by four pixels. Fragments cannot
+  share work; marching the same rays four times would produce the half-res
+  *image* at full-res cost, which is the opposite of the point.
+- **Deferred shading** is the name of the change the other three need.
+
+So the work is one piece: a screen-space pass that reads the G-buffer already
+being written, traces there, accumulates against a history buffer, and
+composites. The pieces it would consume already exist and are tested --
+`Reproject`, `Accumulate`, `Variance`, the epoch rules, `MapToTraceResolution`,
+`GpuIndirectHistoryV1` and its conversions, and a G-buffer carrying albedo,
+both normals, roughness and depth. None of them is the obstacle; where the
+trace happens is.
+
+It is not started here. It moves the ray-traced terms out of the pass every
+current fixture measures them in, and both the device and the oracle would
+have to move together, so it wants to be a phase of its own rather than the
+tail of a session. Recording it as one item rather than four is the useful
+part: sequencing them as separate tasks would build the same pass three times
+or, worse, three different ones.
