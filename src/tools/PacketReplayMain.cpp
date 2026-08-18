@@ -8616,6 +8616,24 @@ void PrintUsage()
         static const std::array<const char*, 5> kEffectSlots{
             "effect-base", "effect-greyscale", "effect-environment",
             "effect-normal", "effect-environment-mask"};
+        // Whether the flag and the slot agree about which texture is the
+        // ramp. Naming slot 3 "the palette ramp" is an inference from the
+        // field order, and a material that declares the flag without
+        // authoring that slot -- or the reverse -- is what would refute it.
+        if (material.grayscaleToPaletteColor) {
+            ++flagCounts[material.textures[3].empty()
+                ? "palette-declared-without-slot3"
+                : "palette-declared-with-slot3"];
+        } else if (!material.textures[3].empty()) {
+            ++flagCounts["slot3-authored-without-palette"];
+        }
+        // The engine carries glow and the palette ramp in one overloaded
+        // texture role, so a material that authored both would have nowhere
+        // to put the second. If that never happens across the corpus the
+        // overload is consistent; if it happens even once it is not.
+        if (!material.textures[3].empty() && !material.textures[5].empty()) {
+            ++flagCounts["greyscale-and-glow-together"];
+        }
         if (material.kind == materialfile::MaterialFileKind::Shader) {
             for (std::size_t slot = 0; slot < material.textures.size();
                  ++slot) {

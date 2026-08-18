@@ -358,10 +358,13 @@ The sweep counts authored texture slots, which settles two deferrals that
 rested on the data not existing:
 
 - **The greyscale-to-palette ramp is authored in the corpus** -- 287
-  materials fill slot 3, and 319 declare the flag. The note above says
-  applying a palette "would mean inventing a ramp"; it would not. The ramp is
-  missing from the *recorded role IDs*, not from the game, which is a capture
-  gap and a much smaller one.
+  materials fill slot 3, and of the 319 that declare the flag, 282 author it.
+  The note above says applying a palette "would mean inventing a ramp"; it
+  would not, because 287 real ones ship in the archive. The role list still
+  has no entry for it, though, and it cannot borrow the glow role: 10
+  materials author a greyscale texture and a glow texture at once, so the two
+  are not one overloaded slot. Adding a role captures real data; 37 materials
+  declare the flag with no ramp and still need a defined result.
 - **POM has real height data** -- 58 materials author a displacement map.
   0.8% of the corpus, but the march would run against authored data rather
   than a synthetic fixture.

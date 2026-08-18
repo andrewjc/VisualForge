@@ -5552,3 +5552,27 @@ from this corpus and is not worth a shader path on its own evidence.
 The sweep runs against the installed archive and so is not a ctest -- the
 parsers are covered by synthetic fixtures instead, 412 tests passing in both
 configurations with the one build-probe failure against the updated game.
+
+### Correction: the palette ramp needs a role of its own
+
+The entry above says the ramp "is missing from the capture, not the game".
+The first half of that is right and the implication drawn from it was not.
+
+Cross-counted, the identification of slot 3 holds: of 319 materials declaring
+`grayscaleToPaletteColor`, **282 author slot 3**, 37 declare it without a
+ramp, and 5 author a ramp without declaring it. So slot 3 is the ramp, and an
+implementation has to handle "declared but absent" for those 37.
+
+What does not hold is the next step. The recorded role IDs run 0..7 and have
+no palette entry, and the obvious reading -- that the ramp travels in the
+overloaded glow role, since the engine's texture set overloads that slot --
+predicts that no material authors both. Measured: **10 do.** Ten materials
+author a greyscale texture and a glow texture at once, so the two cannot be
+the same slot, and the ramp cannot ride in on the glow role.
+
+So Phase 16's original wording was right and this session's gloss on it was
+not: the palette slot really is not among the recorded roles. What the sweep
+changes is only that the ramp is no longer hypothetical -- 287 of them ship
+in the archive -- so adding a role for it captures real data rather than
+inventing any. That is a smaller claim than the one made above and it is the
+one the measurement supports.
