@@ -4050,3 +4050,99 @@ like a measurement that answers the question.
 
 Unresolved and not claimed: the texture capture failed to complete on two of
 five live runs, including runs predating this change.
+
+## Phase 19's traced reflection is verified, and four defects were behind it
+
+The mirror fixture existed and was correct; it had never been registered as a
+test. Running it reported `reflected-pixels=0` with `host-trace-hit=1
+host-trace-distance=1.5` -- the contract's own tracer found the target over the
+same triangles, and the device found nothing. Four separate defects sat between
+those two numbers, each hiding the next.
+
+**One: the acceleration structure was never the problem.** `acceleration
+plans=1/2/2` across the three variants is correct, one geometry per drawn
+object. The `instances=0` in that line is the scene's *explicit* instance
+table, which an implicit-instance scene leaves empty. Read as an empty
+structure it would have sent the whole investigation the wrong way.
+
+**Two: `traced-vs-fallback` was never evidence of tracing.** It compares
+roughness 0.02 against 0.90, and roughness alone changes the BRDF whether or
+not a ray is cast. It read 7,610 while every ray was missing.
+
+**Three: descriptors the pipeline statically uses were left unwritten.** The
+material pipelines sample bindings 1 through 3; a frame supplying only a base
+colour wrote binding 1 and left the normal and smooth/spec bindings never
+updated. Vulkan requires every descriptor a bound pipeline statically uses to
+be valid, so the shader read undefined memory, the shading normal was garbage,
+and the reflection lobe built from it pointed back into the surface it started
+on. Measured: every ray hit object 0 -- its own mirror -- at 0.007 units, the
+ray-origin epsilon. The validation layer had been printing
+`VUID-vkCmdDrawIndexed-None-08114` on every frame of it.
+
+`BindUnclaimedSampledSlots` now fills each unclaimed slot with the neutral
+value for what that slot carries: white for base colour, flat for the normal,
+neutral for the mask. Not white for all three -- a material with no normal map
+must read flat, not read white as though it were one. The landscape layer slot
+is skipped: it is a texture *array* sampled only by the terrain pipeline, and a
+1x1 fallback cannot satisfy an array view.
+
+It has to run **before** `BuildUploadLayout`. The layout budgets space for
+exactly the subresources pending when it runs, so a slot claimed afterwards has
+no offsets reserved and no bytes copied, and the frame is refused for a
+subresource count that disagrees with its own layout.
+
+**Four: the hit albedo was zero for every ordinary material.** With the normals
+fixed the ray hit object 1 at 1.78 units -- the target -- and the reflection
+still carried nothing. `reflection.glsl` shaded the hit from `tintColor`, and
+`TranslateMaterialFamily` fills the tint only when one is *declared*: a tinting
+family, or an explicit tint flag. `tintColor.w` carries that declaration
+precisely so a black tint and an absent tint stay distinguishable, and the
+shader ignored it. Every ordinary material therefore reflected black.
+
+`shaders/phase20/indirect.glsl` had the identical line, so the diffuse bounce
+was black on the same surfaces -- on exactly the walls and floors that carry a
+room's light.
+
+The family record now carries a per-object `baseColor`, appended as its own
+vec4 rather than folded into the spare lane of `subsurface`: a colour smuggled
+through `subsurface.w` reads as data and is not. Both shaders shade from it and
+apply the tint through `vfApplyTint`, the same rule the raster pass uses, so a
+reflected surface cannot disagree with the surface it reflects. The CPU oracle
+takes the same rule, because the two mirror each other branch for branch.
+
+Record sizes moved 368 to 384 and 144 to 160, and the build gate that reflects
+the GPU layout out of the compiled SPIR-V caught the drift before any test ran.
+
+**Mutation.** Deleting the ray query's `rayQueryProceedEXT` loop now fails the
+contract (`reflected-pixels` 10,167 to 0). The previous cycle recorded that
+same mutation as byte-identical, which is what "unverified" meant. Restoring
+the old `tintColor` albedo also fails it. 391 tests pass in Debug and Release.
+
+### Two more found on the way
+
+The registered contract segfaulted at exit in Release while printing
+`result=pass` in Debug -- the failure shape this journal already has an entry
+for. `RenderMirrorScene` never destroyed its raster, so the Vulkan device was
+torn down after the module that created it had unloaded. Every other mode does
+it; this one was written without it and was never registered, so nothing
+noticed.
+
+The phase 21 additive gate then failed with 212 darker pixels. Its baseline was
+"the same frame with the transparent table removed" -- but a blended draw is
+excluded from the acceleration structure exactly *because* the table names it,
+so the baseline reflected a quad the render it was compared against had
+excluded. The comparison's whole premise is that everything beneath the layer
+is identical. It was invisible for as long as reflections shaded black,
+whatever they hit.
+
+The additive layer now has its own baseline: the identical packet, with a new
+`RasterFrameSuppressTransparentComposite` frame flag and nothing else changed.
+The flag rides on the submitted copy alone -- the additive, decal and reordered
+renders all start from the shared baseline request, and each exists to
+composite something, so inheriting it made every one of them draw no layer.
+
+**Reflections were "off" in that fixture only because the albedo was black.**
+Nothing declared them off; the shader traces unconditionally under
+`VF_RAY_QUERY`. A frame that wants no ray-traced terms has no way to say so,
+and that is still true -- it is now recorded rather than compensated for by an
+accident.
