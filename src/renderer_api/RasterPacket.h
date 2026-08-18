@@ -251,6 +251,16 @@ private:
 [[nodiscard]] PacketResult EncodePacket(
     const DecodedPacket& packet,
     std::vector<std::byte>& bytes) noexcept;
+// Reads and validates only the header.
+//
+// A caller that declares an unchanged packet generation is saying the geometry
+// sections are the ones the decoder already holds. The header is not among
+// them -- frame index, extent and viewport change every frame -- so it is read
+// separately and checked exactly as a full decode checks it. Believing a
+// generation is not the same as believing whatever bytes arrive with it.
+[[nodiscard]] PacketResult DecodePacketHeader(
+    std::span<const std::byte> bytes,
+    PacketHeaderV1& header) noexcept;
 [[nodiscard]] PacketResult DecodePacket(
     std::span<const std::byte> bytes,
     DecodedPacket& decoded) noexcept;

@@ -23,7 +23,7 @@ constexpr std::uint32_t kBackendAbiPhase23Minor = 12;
 constexpr std::uint32_t kBackendAbiTextureLibraryMinor = 13;
 // The frame request carries a texture library generation.
 constexpr std::uint32_t kBackendAbiLibraryGenerationMinor = 14;
-constexpr std::uint32_t kBackendAbiMinor = 15;
+constexpr std::uint32_t kBackendAbiMinor = 16;
 constexpr char kBackendQueryExport[] = "VFRenderer_QueryInterface";
 constexpr std::uint32_t kBridgeImageCount = 3;
 
@@ -339,6 +339,23 @@ struct alignas(8) RasterFrameRequestV1
     // before.
     std::uint32_t indirectRaysPerPixel{};
     std::uint32_t reservedIndirect{};
+    // A caller's own generation for the raster packet's *contents*.
+    //
+    // The same declaration the texture library already carries, for the same
+    // reason and with the same saving. Measured on a mirrored frame: the
+    // backend spends about 34 ms of a 95 ms frame decoding packets, and the
+    // raster packet alone is 66 MB. The host encodes it from a cache that
+    // hits 96% of the time, so on most frames it hands over bytes it has
+    // already handed over and the backend rebuilds the same vertices,
+    // indices, draws and materials from them.
+    //
+    // Equal generations mean the geometry sections are the ones the backend
+    // already holds. The header is decoded regardless -- it carries the frame
+    // index, the extent and the viewport, which change every frame and are
+    // fixed-size to read. Zero means the caller tracks no generation and the
+    // backend decodes everything, so a caller built against an older header
+    // behaves exactly as it did.
+    std::uint64_t packetGeneration{};
 };
 
 struct alignas(8) RasterStatusV1
@@ -480,6 +497,9 @@ constexpr std::size_t kRasterFrameRequestV1IndirectRaysRequiredSize =
     sizeof(RasterFrameRequestV1::indirectRaysPerPixel);
 // The contract's count, and the backend's default when a frame declares none.
 constexpr std::uint32_t kDefaultIndirectRaysPerPixel = 8;
+constexpr std::size_t kRasterFrameRequestV1PacketGenerationRequiredSize =
+    offsetof(RasterFrameRequestV1, packetGeneration) +
+    sizeof(RasterFrameRequestV1::packetGeneration);
 constexpr std::size_t kRasterStatusV1RequiredSize =
     offsetof(RasterStatusV1, reserved);
 constexpr std::size_t kBackendApiV1BridgeRequiredSize =

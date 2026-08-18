@@ -693,6 +693,12 @@ struct VulkanRasterRenderer::Impl
     bool independentBlendSupported{};
     bool pipelineStatisticsSupported{};
     VkQueryPool statisticsPool{VK_NULL_HANDLE};
+    // The decoded raster packet, kept across frames so a caller that declares
+    // an unchanged generation does not pay to rebuild it.
+    raster::DecodedPacket retainedPacket;
+    std::uint64_t packetGeneration{};
+    std::uint64_t packetReuseHits{};
+    std::uint64_t packetReuseMisses{};
     std::uint64_t statisticsFragments{};
     bool ready{};
 
@@ -6063,15 +6069,44 @@ abi::Result VulkanRasterRenderer::Render(
 
     const auto* packetAddress = reinterpret_cast<const std::byte*>(
         static_cast<std::uintptr_t>(request.packetData));
-    raster::DecodedPacket packet;
-    const auto packetResult = raster::DecodePacket(
-        std::span{packetAddress,
-            static_cast<std::size_t>(request.packetSize)}, packet);
-    if (!packetResult) {
-        impl_->FillStatus(status, abi::Result::RasterInvalidPacket,
-            raster::ToString(packetResult.error));
-        status.packetError = static_cast<std::uint32_t>(packetResult.error);
-        return abi::Result::RasterInvalidPacket;
+    const std::span packetBytes{packetAddress,
+        static_cast<std::size_t>(request.packetSize)};
+    const auto declaredGeneration =
+        request.structSize >=
+            abi::kRasterFrameRequestV1PacketGenerationRequiredSize
+        ? request.packetGeneration : 0ull;
+    // The geometry the backend already holds, when the caller says so.
+    //
+    // The header is decoded either way: it carries the frame index, the
+    // extent and the viewport, which change every frame and cost a fixed
+    // read. What the generation spares is the 66 MB behind it.
+    const auto reuseGeometry = declaredGeneration != 0 &&
+        declaredGeneration == impl_->packetGeneration &&
+        !impl_->retainedPacket.vertices.empty();
+    raster::DecodedPacket& packet = impl_->retainedPacket;
+    if (reuseGeometry) {
+        const auto headerResult = raster::DecodePacketHeader(packetBytes,
+            packet.header);
+        if (!headerResult) {
+            impl_->FillStatus(status, abi::Result::RasterInvalidPacket,
+                raster::ToString(headerResult.error));
+            status.packetError =
+                static_cast<std::uint32_t>(headerResult.error);
+            return abi::Result::RasterInvalidPacket;
+        }
+        ++impl_->packetReuseHits;
+    } else {
+        const auto packetResult = raster::DecodePacket(packetBytes, packet);
+        if (!packetResult) {
+            impl_->packetGeneration = 0;
+            impl_->FillStatus(status, abi::Result::RasterInvalidPacket,
+                raster::ToString(packetResult.error));
+            status.packetError =
+                static_cast<std::uint32_t>(packetResult.error);
+            return abi::Result::RasterInvalidPacket;
+        }
+        impl_->packetGeneration = declaredGeneration;
+        ++impl_->packetReuseMisses;
     }
     const auto minimumPitch = static_cast<std::uint64_t>(
         packet.header.width) * 4;

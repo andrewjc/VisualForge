@@ -285,6 +285,43 @@ PacketResult EncodePacket(
     }
 }
 
+PacketResult DecodePacketHeader(
+    const std::span<const std::byte> bytes,
+    PacketHeaderV1& header) noexcept
+{
+    header = {};
+    PacketHeaderV1 candidate{};
+    if (bytes.size() < sizeof(PacketHeaderV1)) {
+        return {PacketError::TruncatedHeader, bytes.size()};
+    }
+    std::memcpy(&candidate, bytes.data(), sizeof(candidate));
+    if (candidate.magic != kPacketMagic) {
+        return {PacketError::BadMagic, offsetof(PacketHeaderV1, magic)};
+    }
+    if (candidate.versionMajor != kPacketVersionMajor ||
+        candidate.versionMinor > kPacketVersionMinor) {
+        return {PacketError::UnsupportedVersion,
+            offsetof(PacketHeaderV1, versionMajor)};
+    }
+    if (candidate.headerSize < sizeof(PacketHeaderV1) ||
+        candidate.headerSize > candidate.totalSize) {
+        return {PacketError::TruncatedHeader,
+            offsetof(PacketHeaderV1, headerSize)};
+    }
+    if (candidate.totalSize != bytes.size()) {
+        return {PacketError::SizeMismatch,
+            offsetof(PacketHeaderV1, totalSize)};
+    }
+    if (candidate.width == 0 || candidate.height == 0 ||
+        candidate.width > kMaximumExtent ||
+        candidate.height > kMaximumExtent) {
+        return {PacketError::InvalidExtent,
+            offsetof(PacketHeaderV1, width)};
+    }
+    header = candidate;
+    return {PacketError::None, 0};
+}
+
 PacketResult DecodePacket(
     const std::span<const std::byte> bytes,
     DecodedPacket& decoded) noexcept

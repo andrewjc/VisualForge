@@ -585,3 +585,32 @@ TEST_CASE("packet byte ceiling follows the device it will be uploaded to")
         }
     }
 }
+
+TEST_CASE("PM_the_packet_header_can_be_read_without_decoding_the_geometry",
+    "[raster][packet]")
+{
+    // A caller that declares an unchanged generation is telling the backend
+    // the geometry sections are the ones it already holds. The header is not
+    // among them: it carries the frame index, the extent and the viewport,
+    // which change every frame. Reading it alone is what lets the 66 MB
+    // behind it be skipped -- measured at 34 ms of a 95 ms mirrored frame.
+    using namespace vf::renderer::raster;
+    SyntheticPacketOptions options{};
+    options.frameIndex = 9;
+    const auto bytes = BuildSyntheticPacket(options);
+    REQUIRE_FALSE(bytes.empty());
+
+    PacketHeaderV1 header{};
+    REQUIRE(DecodePacketHeader(bytes, header));
+    CHECK(header.frameIndex == options.frameIndex);
+    CHECK(header.width == options.width);
+    CHECK(header.height == options.height);
+
+    // And it refuses the same things a full decode refuses, or a caller could
+    // hand over anything at all and have its generation believed.
+    auto corrupt = bytes;
+    corrupt[0] = std::byte{0};
+    PacketHeaderV1 rejected{};
+    CHECK_FALSE(DecodePacketHeader(corrupt, rejected));
+    CHECK_FALSE(DecodePacketHeader(std::span{bytes}.first(4), rejected));
+}
