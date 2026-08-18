@@ -264,8 +264,7 @@ Stated gaps, not silent ones:
 - **Greyscale-to-palette is declared but not applied.** The palette lookup
   texture's slot is not among the recorded role IDs, so applying a palette
   would mean inventing a ramp. The flags travel in the record.
-- **POM marching is not implemented.** Scale, bias, UV scale, and the step
-  range are carried and validated; the march itself is not in the shader.
+- ~~POM marching is not implemented.~~ Landed. See "Parallax occlusion" below.
 - ~~The installed-corpus sweep has not been run.~~ Run: 6899 of 6899 entries
   parsed exactly, and nine of twenty-three families occur. See "The corpus
   sweep" below.
@@ -371,3 +370,50 @@ rested on the data not existing:
 
 And one that argues the other way: `inner-layer=4`. Multi-layer parallax is
 effectively absent and does not earn a shader path on this evidence.
+
+## Parallax occlusion
+
+The march is in the shader and mirrored on the CPU, exercised by
+`--render-family-scene --parallax` and registered as
+`contract.family_parallax_frame`.
+
+Everything it needed was already carried. Scale, bias and UV scale ride in the
+record's `parallax` vector and the step range in the spare wetness lanes. The
+height field arrives through the frame's texture library, indexed from the
+family record, because the four sampled slots are all spoken for -- the
+fourth is the terrain layer array -- and a table that already exists beats a
+fifth binding for one feature.
+
+The reference needed its surface normals *before* it samples the base colour,
+since the march decides which texel that sample reads. The normal computation
+became a helper called once rather than a block moved, so there is no second
+copy to drift.
+
+### The fixture had to be made to measure something
+
+Two versions of it passed every mutation.
+
+A two-texel height field shows that a march happens and not whether it
+marched the right distance: with two values the ray either stops at once or
+runs to the end, and every step count lands on the same texel. And a surface
+facing the camera sweeps nowhere at all, because the displacement is along the
+view direction *projected into the surface* -- so the march was a no-op, and
+the 35922 bytes of frame that changed when the fixture was switched on were
+object 1 gaining a family record, not parallax.
+
+With a 16x16 diagonal ramp and the surface turned 0.9 radians:
+
+| mutation | interior mismatches | G-buffer max error |
+| --- | --- | --- |
+| none | 0 | 0.00078 |
+| step range reversed | 37 | 0.299 |
+| interpolation dropped | 51 | 0.299 |
+| march skipped | 80 | 0.299 |
+
+### Not claimed
+
+The march is the textbook one and both sides agree on it exactly. Whether the
+convention is Bethesda's -- how deep a given `parallaxScale` pushes, which
+channel of the height map is read -- is a choice that only a captured frame
+settles. The corpus sweep says 58 materials ship a height map, so there is
+real data to check it against once a frame can be captured.
