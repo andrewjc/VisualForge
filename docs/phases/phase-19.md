@@ -286,3 +286,22 @@ The residual is therefore small, real, and unnamed. The probe watches one
 channel of one path; widening it to all three channels and separating the
 specular term from the bounce is the next step, and it is a lane and a
 contract run rather than a design change.
+
+## The reflection path is exonerated
+
+Widened to all three channels: the interpolated colour agrees between device
+and reference to about `5e-08` per channel, the fetched corner is
+bit-identical, the hit point agrees to `5.1e-05`, and the radiance clamp
+mirrors exactly. With the interpolation applied the interior comparison still
+reports 200 mismatches against a bound of 41.
+
+Every part of the reflection path is accounted for. The remaining suspect is
+the diffuse bounce, which casts eight rays per pixel and whose hits are
+neither reported nor excluded, unlike the reflection's single ray. That is
+inference rather than measurement -- the bounce has not been probed -- and it
+is the next step.
+
+It carries a design consequence: excluding a pixel when any of eight rays
+diverges is a few per cent of the frame rather than a quarter of one per cent,
+and whether that remains a comparison worth having is a judgement call, not a
+measurement.

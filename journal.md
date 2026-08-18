@@ -4884,3 +4884,47 @@ What is left is smaller than any of them and is not yet named. The instrument
 has been right every time and the theory has been wrong every time, which is
 the only durable lesson here: the next move is another lane, not another
 story.
+
+## The reflection path is clear; the bounce is the only place left
+
+The probe was widened as specified -- all three channels, weighted 1, 8 and 64
+so a disagreement in any one shows -- and the clamp was checked as a possible
+threshold amplifier.
+
+```text
+divergent-hits=0 probe-delta=3.8147e-06 shadow-interior-mismatches=200
+```
+
+`probe-delta` is over a value weighted up to 73x, so **the three channels of
+the reflection's interpolated colour agree to about 5e-08**. The clamp is not
+it either: `vfClampIndirect` mirrors `gi::ClampRadiance` exactly, 8.0 per
+channel with non-finite to zero, and it was checked before anything was
+written rather than after.
+
+That clears the reflection path completely. Everything it does -- find a hit,
+identify it, fetch the corners, weight them -- matches the reference to within
+a few parts in a hundred million, and the comparison still fails by 159 pixels
+beyond its bound.
+
+**The bounce is the only path left, and it is the one the mask does not
+cover.** The reflection casts one ray per pixel and the two intersectors
+disagree about it on 0.28% of pixels, which the mask excludes and counts. The
+diffuse bounce casts *eight*, over a hemisphere, and nothing reports or
+excludes their hits. Eight independent chances at a 0.28% disagreement is
+about 2.2% of pixels having at least one divergent bounce ray -- against 200
+of 41,981 exceeding the tolerance, which is the same order.
+
+Stated honestly: that is inference, not measurement. It is consistent with
+every number taken and it is the only unprobed path, but the bounce's hits have
+not been reported and compared the way the reflection's have. Doing that is
+the next lane, and it carries a design consequence worth knowing before it is
+built: a pixel would be excluded when *any* of its eight rays diverges, so the
+exclusion would be a few per cent rather than a quarter of one, and whether
+that is still a comparison worth having is a judgement rather than a
+measurement.
+
+Five candidates proposed for this disagreement and five eliminated: different
+reflection hits, sub-primitive hit points, a fetch defect, the fetch
+infrastructure, and the radiance clamp. The reflection path is exonerated
+channel by channel. What is left is one path, one probe, and a decision about
+what an eight-ray exclusion is worth.
