@@ -227,10 +227,8 @@ and both are recorded in `journal.md` as pitfalls.
   exist and are tested, but the backend does not yet consult them.
 - One instance per drawn object with no BLAS sharing. Real reuse needs stable
   geometry identity across frames, which arrives with streaming.
-- Cutout occluders are flagged `VK_GEOMETRY_OPAQUE_BIT_KHR` in the backend
-  because this fixture carries none. `RequiresAnyHit` and
-  `ConfirmAlphaCandidate` decide the cutout path and are tested on the CPU;
-  wiring an any-hit shader to them is outstanding.
+- ~~Cutout occluders are flagged `VK_GEOMETRY_OPAQUE_BIT_KHR`~~ -- landed. See
+  "Cutout occluders" below.
 
 ## The rebuild-every-frame gap, measured
 
@@ -327,3 +325,42 @@ object. Measured, six rotations of 1,137 differ between frames, so a
 static/dynamic split would refit only the movers rather than every geometry.
 The refit already recovers most of what that would, and the remaining ~7 ms is
 now a smaller target than the ~26 ms of unattributed frame beside it.
+
+## Cutout occluders
+
+Landed. With ray query there is no any-hit *shader*: the equivalent is leaving
+the geometry non-opaque so traversal offers a candidate, and confirming it or
+not. Both halves are in place and mutation-tested.
+
+- The structure flags geometry opaque only when the frame's alpha
+  classification says it is, so a cutout produces candidates.
+- The shadow ray no longer passes `gl_RayFlagsOpaqueEXT`, which overrode the
+  structure and committed geometry the shader was meant to test. Each
+  candidate goes through the **same coverage rule and the same per-object
+  alpha record the raster pass uses**, not a second alpha test.
+- The oracle samples the texture alpha at the candidate. `ShadowTriangle` had
+  `alphaAtVertex`, which nothing ever wrote and which cannot describe a leaf
+  with three corner values.
+
+Measured on the family fixture with a cutout occluder: the occluder's own
+surface loses 954 of its 1715 pixels to the texture and both sides agree
+exactly (`761` and `761`); its shadow loses its solid interior
+(`shadowed-pixels` 7199 to 5542) with `shadow-interior-mismatches=0` at a max
+error of `0.00195`.
+
+| mutation | shadow mismatches |
+| --- | --- |
+| none | 0 |
+| candidate always occludes | 1519 |
+| structure keeps the geometry opaque | 1519 |
+| oracle ignores the texture alpha | 1429 |
+
+### What it uncovered
+
+Landing it exposed a defect with nothing to do with shadows: an alpha-tested
+surface was shaded by `phase15/alpha_scene.frag`, which predates the material
+families and reads no family record, no normal map and no glow map. Any object
+classified a cutout silently lost its material -- foliage, fences, ladders and
+grates included. The colour pass now binds a pipeline built from the family
+shader with the same depth state, which the shader already supports because
+the coverage test and its discard live there.
