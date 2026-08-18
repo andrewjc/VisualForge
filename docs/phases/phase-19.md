@@ -358,3 +358,66 @@ with `EnvironmentReflectionDisabled` or `EnvironmentShadowsDisabled` set, so
 both sides can produce a with-and-without pair. Differencing gives the term
 alone, where a 15% error is 15%, and tile means over that difference keep the
 noise averaged while restoring the sensitivity.
+
+## Resolved: per-hit attributes are landed and verified
+
+The section above proposed differencing the with-and-without pair and taking
+tile means over it. That was necessary and not sufficient: with 16x16 tiles the
+whole reflection term peaks at 0.114 while the part a geometry hit contributes
+peaks at 0.0022, so a 1.15x hit albedo still moved a tile mean by only 3e-4 and
+still passed. Geometry hits here are 200 pixels in 786432 -- sparse and strong,
+and a 256-pixel mean spreads each one out until it is gone.
+
+The mean is taken over the hit pixels instead. Both sides report what their ray
+found in the reactive plane's spare lanes, so that is a set they agree on
+rather than a guess, and on it the same error is 15%.
+
+The interpolated vertex colour is landed. Three mutations fail and the clean
+build passes, with a full build each time so the SPIR-V is re-embedded:
+
+| mutation | signed mean | magnitude-weighted mean |
+| --- | --- | --- |
+| none | 0.41% | 2.90% |
+| hit albedo x1.15 | 15.4% | 15.0% |
+| barycentric weights permuted | 0.80% | 8.35% |
+| vertex colour read one float over | 23.9% | 15.5% |
+
+Both statistics are gated at 5% because they fail to different things: the
+signed mean is nearly blind to a permutation, which leaves the average where it
+was.
+
+### The bounce was the blocker, and it is compared as a term
+
+Measured, not inferred: of the 200 interior mismatches the interpolation
+produced, **200** were pixels whose diffuse bounce hit different geometry on
+the two sides, and of the 659 HDR mismatches, **659**. The reflection's single
+deterministic ray disagreed on none.
+
+Excluding those pixels was tried and is confirmed vacuous -- it removes
+`hdr-excluded=13689`, exactly the lit-pixel count, leaving background that
+agrees to 2.2e-05 because nothing was traced there. So the frame is split by
+what kind of quantity each part is:
+
+- the deterministic frame, compared per pixel against a new shadowed
+  no-bounce reference, all 49152 pixels, interior agreeing to 0.0092 with zero
+  mismatches;
+- the diffuse bounce, differenced out of both sides and compared as tile
+  means, 78 carrying tiles peaking at 0.142 and agreeing to 0.0028.
+
+Nothing is excluded and no bound is loosened. This is the "statistical
+comparison of the bounce" that the sections above named as one of the three
+ways forward.
+
+### Still not measured
+
+Hit *position* is only coarsely observed. A 1000-unit displacement is caught
+(417%) and a 1.5x distance error is caught (36.8%), but a 1.05x distance error
+is bit-identical: fog begins at 2.0, the reflected hits sit below it, so
+`vfFog` returns exactly zero either side of a small displacement and the point
+lamp contributes negligibly there. Gross attribute errors are caught; a
+few-per-cent error in `t` is not. What would settle it is a reflected hit
+placed beyond the fog near distance.
+
+Texture fetch at a hit and more than one sample per pixel are no longer
+blocked: `vfHitTexCoord` exists alongside `vfHitVertexColor`, and the
+instrument that verifies one verifies the other.
