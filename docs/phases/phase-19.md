@@ -171,3 +171,47 @@ named rather than implied by omission:
   fixture runs with `probeAvailable` false and interiors resolve to
   `Unresolved`.
 - **Metalness is inferred**, as described above, rather than captured.
+
+## The traced reflection is verified
+
+`contract.mirror_scene_frame` is registered and renders three variants of a
+purpose-built fixture: the mirror alone, the mirror with a target along its
+reflected direction, and the same target with the mirror roughened past the
+tracing cutoff. The geometry is computed rather than chosen -- a 45-degree
+mirror at (0, 0, 3) reflects a view down +Z to exactly (-1, 0, 0), so the
+target goes at (-1.5, 0, 3), facing the mirror.
+
+The fixture already existed and had never been registered. Running it exposed
+four defects in sequence, each hiding the next:
+
+1. `acceleration ... instances=0` reports the scene's *explicit* instance
+   table, which an implicit-instance scene leaves empty. It is not an empty
+   structure, and reading it as one sends the investigation the wrong way.
+2. `traced-vs-fallback` compares roughness 0.02 against 0.90. Roughness alone
+   changes the BRDF whether or not a ray is cast, so it read 7,610 while every
+   ray was missing. It is not evidence of tracing.
+3. The material pipelines statically sample bindings 1 through 3, and a frame
+   supplying only a base colour left two of them never written. The shader
+   read undefined memory, the shading normal was garbage, and every reflection
+   ray hit its own mirror 0.007 units away -- the ray-origin epsilon. The
+   validation layer had been reporting it as
+   `VUID-vkCmdDrawIndexed-None-08114` throughout.
+4. The hit albedo was `tintColor`, which is zero unless a tint is *declared*.
+   Every ordinary material reflected black. `shaders/phase20/indirect.glsl`
+   carried the identical line, so the diffuse bounce was black on the same
+   surfaces.
+
+Mutation-verified: deleting the ray query's `rayQueryProceedEXT` loop now
+fails the contract (`reflected-pixels` 10,167 to 0). The previous cycle
+recorded that same mutation as byte-identical, which is what "unverified"
+meant. Restoring the `tintColor` albedo also fails it.
+
+## Still outstanding
+
+- **No texture fetch at a reflection hit.** The hit shades from the object's
+  declared base colour, which is a real per-object value rather than the zero
+  the tint supplied, but it is still not the surface's base-colour *texture*.
+  A ray query has no UVs bound; the hit attribute and index-buffer bindings
+  that would make a fetch possible are the next step.
+- **No temporal or spatial filtering**, one sample per pixel, and no probe
+  capture. Unchanged from the list above.

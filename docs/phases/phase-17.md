@@ -160,9 +160,6 @@ Stated gaps, not silent ones:
 - **Sky and weather resources are not rendered.** The environment record
   carries sun, moon, ambient, and fog, and weather transitions blend between
   two environments, but no sky dome or cloud layer is drawn.
-- **The moon contributes nothing yet.** Its direction, colour, and intensity
-  are captured, validated, blended, and uploaded, but only the sun and the
-  explicit light list are evaluated.
 - **No live capture of engine lights.** The light list is a fixture. The
   capture boundary is identified (`ShadowSceneNode`) but not hooked.
 
@@ -179,3 +176,18 @@ Phase 17 is **not live-promoted**. Its exit gate additionally requires
 captured engine lights and weather — real `NiLight` instances read from
 `ShadowSceneNode` in a running Fallout 4 — compared against this mirror
 inside the declared unshadowed parity envelope.
+
+## Closed since
+
+- **The moon is evaluated.** It is built into a directional light by
+  `environment::MakeCelestialLight`, the same function the sun goes through, so
+  the two cannot drift apart. It had been captured, validated, blended and
+  uploaded into the environment record while nothing read it: surface shading
+  evaluates the ambient term and the light list, and only the sun was ever
+  turned into a list entry. A night exterior was lit by ambient alone.
+
+  A zero intensity is not a reason to leave the light out. The record already
+  zeroes both bodies for an interior, and a light contributing nothing is
+  cheaper to carry than a list whose length depends on the weather.
+
+  Mutation-verified: selecting the sun's intensity for the moon fails the case.
