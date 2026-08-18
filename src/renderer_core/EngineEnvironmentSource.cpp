@@ -146,11 +146,18 @@ EnvironmentSourceError ReadDirectionalLight(
     return EnvironmentSourceError::None;
 }
 
-EnvironmentSourceError MakeDirectionalLight(
+EnvironmentSourceError MakeCelestialLight(
     const lighting::EnvironmentRecordV1& environment,
+    const CelestialBody body,
     const std::uint64_t lightId,
     lighting::LightRecordV1& light) noexcept
 {
+    const auto& direction = body == CelestialBody::Moon
+        ? environment.moonDirection : environment.sunDirection;
+    const auto& colour = body == CelestialBody::Moon
+        ? environment.moonColor : environment.sunColor;
+    const auto intensity = body == CelestialBody::Moon
+        ? environment.moonIntensity : environment.sunIntensity;
     // An identity of zero is refused by the packet, and a caller that passed
     // one would otherwise learn about it much further downstream.
     if (lightId == 0) {
@@ -165,7 +172,7 @@ EnvironmentSourceError MakeDirectionalLight(
     // a direction that is not one shades the whole scene from nowhere.
     float lengthSquared = 0.0f;
     for (std::size_t axis = 0; axis < 3; ++axis) {
-        const auto component = environment.sunDirection[axis];
+        const auto component = direction[axis];
         if (!std::isfinite(component)) {
             return EnvironmentSourceError::DirectionDegenerate;
         }
@@ -181,7 +188,7 @@ EnvironmentSourceError MakeDirectionalLight(
     light = {};
     light.lightId = lightId;
     light.type = static_cast<std::uint8_t>(lighting::LightType::Directional);
-    light.intensity = environment.sunIntensity;
+    light.intensity = intensity;
     // Negated. LightRecordV1 stores the direction light travels --
     // EvaluateDirectGpu computes toLight as -direction -- while the engine's
     // vector points toward the light. Measured rather than assumed: passing
@@ -189,8 +196,8 @@ EnvironmentSourceError MakeDirectionalLight(
     // and left the ones facing it black, which is the one error a "the
     // picture changed" check cannot catch, because it changes just as much.
     for (std::size_t axis = 0; axis < 3; ++axis) {
-        light.direction[axis] = -environment.sunDirection[axis];
-        light.color[axis] = environment.sunColor[axis];
+        light.direction[axis] = -direction[axis];
+        light.color[axis] = colour[axis];
     }
     light.color[3] = 1.0f;
     light.direction[3] = 0.0f;
@@ -203,6 +210,14 @@ EnvironmentSourceError MakeDirectionalLight(
     light.radius = 0.0f;
     light.constantAttenuation = 1.0f;
     return EnvironmentSourceError::None;
+}
+
+EnvironmentSourceError MakeDirectionalLight(
+    const lighting::EnvironmentRecordV1& environment,
+    const std::uint64_t lightId,
+    lighting::LightRecordV1& light) noexcept
+{
+    return MakeCelestialLight(environment, CelestialBody::Sun, lightId, light);
 }
 
 EnvironmentSourceError SelectDirectionalLight(

@@ -363,6 +363,7 @@ constexpr const char* kMirrorLightBufferName = "cbVolume";
 // do -- the packet refuses zero and rejects duplicates -- but it is fixed so
 // the same light keeps the same identity from frame to frame.
 constexpr std::uint64_t kMirrorSunLightId = 0x53554E0000000001ull;
+constexpr std::uint64_t kMirrorMoonLightId = 0x4D4F4F4E00000001ull;
 // The frame's light packet, empty whenever the sun could not be resolved.
 // Empty is a real answer: the backend then has no environment and leaves the
 // albedo alone, which is correct behaviour for a session whose volumetric
@@ -597,13 +598,28 @@ void BuildMirrorLighting()
     // sunColor are carried for provenance but nothing evaluates them, so a
     // sun delivered only there shades nothing and looks exactly like no sun.
     lighting::LightRecordV1 sun{};
-    const auto sunBuilt = environment::MakeDirectionalLight(
-        record, kMirrorSunLightId, sun);
+    const auto sunBuilt = environment::MakeCelestialLight(
+        record, environment::CelestialBody::Sun, kMirrorSunLightId, sun);
     if (sunBuilt != environment::EnvironmentSourceError::None) {
         s_mirrorLightError = sunBuilt;
         return;
     }
     packet.lights.push_back(sun);
+    // The moon on the same terms. Its direction, colour and intensity travel
+    // in the same record and were read by nothing, so a night exterior was
+    // lit by the ambient term alone.
+    //
+    // A zero intensity is not a reason to leave it out: the record already
+    // zeroes both bodies for an interior, and a light contributing nothing is
+    // cheaper to carry than a list whose length depends on the weather.
+    lighting::LightRecordV1 moon{};
+    const auto moonBuilt = environment::MakeCelestialLight(
+        record, environment::CelestialBody::Moon, kMirrorMoonLightId, moon);
+    if (moonBuilt != environment::EnvironmentSourceError::None) {
+        s_mirrorLightError = moonBuilt;
+        return;
+    }
+    packet.lights.push_back(moon);
     // Reported as itself. An earlier version folded this into the read's own
     // "no candidate", which said the sun was never found when in fact it was
     // found and then failed to encode -- a diagnosis that sent the search back

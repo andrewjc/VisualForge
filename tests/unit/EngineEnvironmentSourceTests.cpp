@@ -517,3 +517,55 @@ TEST_CASE("the measured sun shades differently along different normals")
     // "the picture changed" check would catch.
     CHECK(lit[0] + lit[1] + lit[2] > unlit[0] + unlit[1] + unlit[2]);
 }
+
+TEST_CASE("P17_the_moon_becomes_a_light_like_the_sun_does",
+    "[phase17][environment]")
+{
+    // The moon's direction, colour and intensity are captured, validated,
+    // blended and uploaded into the environment record -- and nothing ever
+    // read them. Surface shading evaluates the ambient term and the light
+    // list, and only the sun was ever turned into a list entry, so every
+    // night scene was lit by ambient alone. The environment's own moon
+    // fields are provenance; a body delivered only there shades nothing and
+    // looks exactly like no moon, which is the same trap the sun fell into.
+    lighting::EnvironmentRecordV1 record{};
+    record.flags = lighting::EnvironmentPresent;
+    record.ambient[2] = 0.08f;
+    record.sunDirection[2] = -1.0f;
+    record.sunColor[0] = 1.0f;
+    record.sunColor[1] = 1.0f;
+    record.sunColor[2] = 1.0f;
+    record.sunIntensity = 0.0f;
+    record.moonDirection[2] = -1.0f;
+    record.moonColor[0] = 0.4f;
+    record.moonColor[1] = 0.45f;
+    record.moonColor[2] = 0.9f;
+    record.moonIntensity = 0.25f;
+    record.fogNear = 1.0f;
+    record.fogFar = 1000.0f;
+    record.fogMaximum = 1.0f;
+
+    lighting::LightRecordV1 moon{};
+    REQUIRE(environment::MakeCelestialLight(record,
+                environment::CelestialBody::Moon,
+                0x5000'0000'0000'0002ull, moon) ==
+        environment::EnvironmentSourceError::None);
+    CHECK(moon.type ==
+        static_cast<std::uint8_t>(lighting::LightType::Directional));
+    CHECK(moon.intensity == 0.25f);
+    CHECK(moon.color[0] == 0.4f);
+    CHECK(moon.color[2] == 0.9f);
+    // Negated for the same reason the sun is: the record stores the direction
+    // light travels, and the engine's vector points toward the body.
+    CHECK(moon.direction[2] == 1.0f);
+
+    // And the sun still resolves through the same function, so the two cannot
+    // drift apart.
+    lighting::LightRecordV1 sun{};
+    REQUIRE(environment::MakeCelestialLight(record,
+                environment::CelestialBody::Sun,
+                0x5000'0000'0000'0001ull, sun) ==
+        environment::EnvironmentSourceError::None);
+    CHECK(sun.color[0] == 1.0f);
+    CHECK(sun.intensity == 0.0f);
+}

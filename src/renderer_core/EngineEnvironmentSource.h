@@ -82,7 +82,27 @@ inline constexpr float kDirectionTolerance = 1.0e-3f;
 // the direction light travels -- EvaluateDirectGpu negates it to face the
 // surface -- and every sample measured has a consistently negative Z in this
 // Z-up world, so the engine's vector already points downward from the sky.
+// Which body in the environment record a light is built from.
+//
+// The record carries both, and for a long time only one of them was ever
+// turned into a light. Naming them apart is what stops a second body from
+// being captured, validated, blended, uploaded and then quietly evaluated by
+// nothing -- which is exactly what happened to the moon.
+enum class CelestialBody : std::uint8_t
+{
+    Sun,
+    Moon,
+};
+
+// Builds a directional light from one of the environment's celestial bodies.
+[[nodiscard]] EnvironmentSourceError MakeCelestialLight(
+    const lighting::EnvironmentRecordV1& environment,
+    CelestialBody body,
+    std::uint64_t lightId,
+    lighting::LightRecordV1& light) noexcept;
+
 [[nodiscard]] EnvironmentSourceError MakeDirectionalLight(
+
     const lighting::EnvironmentRecordV1& environment,
     std::uint64_t lightId,
     lighting::LightRecordV1& light) noexcept;
