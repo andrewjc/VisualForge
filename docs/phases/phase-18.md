@@ -293,3 +293,37 @@ The other four terms each have several windows and agree with each other. This
 one wants confirming before the 19 ms is quoted as settled, and the ablation
 leaves the structures describing the previous frame, so it is a measurement
 device and not a mode anything should ship in.
+
+## `DecideBuild` has a caller
+
+The rule that function encodes -- a structure whose topology is unchanged may
+be refitted, and one whose triangle counts moved may not, because refitting
+across that line produces a structure that no longer matches its geometry and
+fails by rays simply missing -- is now what the backend does.
+
+The bottom level is built with `ALLOW_UPDATE`, and the topology is signed
+separately from the placements: geometry count and every geometry's index and
+vertex range on one side, the anchored transforms on the other. A frame whose
+topology matches the last build refits; anything else rebuilds. Re-anchoring
+forces a rebuild, because the anchor moves every placement at once.
+
+Measured live on the Sanctuary cell, against the ablation that declines the
+acceleration work entirely:
+
+| | before | after |
+| --- | --- | --- |
+| acceleration cost per frame | ~19 ms | **~7 ms** |
+| settled frame | ~99 ms | **~33 ms** |
+| operations | 1,795 builds, 245 skips | 2,433 refits, 377 skips |
+
+The refit is possible at all because of two earlier changes. Anchoring made
+the structure's contents a function of the scene rather than of the camera, so
+its topology holds still while the player walks. Identity ordering made the
+geometry set stable frame to frame, which is the prerequisite this document
+named when it deferred the work.
+
+Still not done here: one bottom level per mesh, with a top-level instance per
+object. Measured, six rotations of 1,137 differ between frames, so a
+static/dynamic split would refit only the movers rather than every geometry.
+The refit already recovers most of what that would, and the remaining ~7 ms is
+now a smaller target than the ~26 ms of unattributed frame beside it.
