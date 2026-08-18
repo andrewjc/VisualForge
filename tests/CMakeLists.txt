@@ -7,6 +7,7 @@ add_executable(vf_unit_tests
     unit/EngineAccelerationTests.cpp
     unit/EngineDrawStreamTests.cpp
     unit/EngineImageSpaceTests.cpp
+    unit/EngineInflateTests.cpp
     unit/EngineIndirectTests.cpp
     unit/EngineTransparencyTests.cpp
     unit/EngineBridgeOrderTests.cpp
