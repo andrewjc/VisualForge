@@ -5846,3 +5846,41 @@ is what the attachment was already cleared to, so a frame with no weather is
 untouched by the pass existing.
 
 415 tests, 414 passing in both configurations.
+
+## Correction: three of the four are not one change after all
+
+An earlier entry says the remaining Phase 17 and 20 items are a single
+structural change, because indirect is traced in the forward fragment shader.
+The premise is right and the conclusion was too pessimistic. Checked rather
+than assumed:
+
+**The device already accumulates.** `shaders/phase20/accumulate.comp` is
+built, `RecordIndirect()` dispatches it, and `contract.indirect_accumulation`
+verifies it against the CPU. The kernel is not missing. What is missing is
+that it runs only on buffers the *host* supplies, and nothing in the render
+path feeds it or keeps its history from one frame to the next.
+
+**A per-pixel history write is not a race.** The earlier entry claims
+overdraw makes it one. That is true of an arbitrary read-modify-write, and it
+is not true of a G-buffer plane: depth testing means the frontmost fragment's
+write is the one that survives, which is the property all five existing planes
+already rely on. So the forward pass can write its raw indirect to a plane the
+way it writes albedo, and the accumulate pass can read it.
+
+So the honest split is:
+
+| item | needs deferred shading? |
+| --- | --- |
+| GPU history for temporal reconstruction | **no** -- a plane, persistent history resources, a composite pass |
+| spatial filtering | **no** -- a pass over the history buffer |
+| half-resolution indirect | **yes** -- one trace shared by four pixels is the one thing fragments cannot do |
+| deferred shading | it is the change |
+
+What GPU history actually costs is the part not yet counted: a fixture that
+renders *several* frames. Every contract here renders one, and an accumulator
+that has never seen a second frame cannot show convergence or its absence.
+That is the real work, not the plumbing.
+
+Recording this because sequencing four items behind one architectural change
+would have delayed two of them for no reason, and because the claim it
+corrects is mine from earlier in the same session.
