@@ -5884,3 +5884,32 @@ That is the real work, not the plumbing.
 Recording this because sequencing four items behind one architectural change
 would have delayed two of them for no reason, and because the claim it
 corrects is mine from earlier in the same session.
+
+## The precondition every temporal item rests on, now measured
+
+Before a history can accumulate anything, the device has to answer the same
+question the same way twice. Nothing had checked that: every contract here
+renders one frame, which cannot distinguish "deterministic" from "happened to
+be right once".
+
+The family fixture now submits the identical frame a second time into its own
+buffers and compares. **`repeat-differing=0`, `repeat-max-error=0`** -- bit
+exact, every pixel, in both configurations.
+
+The bound is exact rather than tolerant on purpose. The two submissions carry
+identical packets, so any difference at all is the device answering
+differently to the same question, and a history folds each frame into the last
+-- drift there compounds instead of averaging out. A tolerance would be a
+licence for precisely the artefact temporal accumulation exists to avoid: a
+still camera slowly crawling.
+
+The check is live rather than vacuous: giving the second submission an ambient
+0.05 higher takes it to `repeat-differing=49152` -- every pixel -- and fails
+the contract.
+
+This is the piece that was named as the real cost of GPU history: "a fixture
+that renders several frames", where the plumbing was never the hard part. The
+harness renders two now, and the property it establishes is the one an
+accumulator needs and could not previously assume.
+
+415 tests, 414 passing in both configurations.

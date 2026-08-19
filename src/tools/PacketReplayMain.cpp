@@ -6307,6 +6307,10 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
     std::vector<std::array<float, 4>> baselineHdr;
     // The device's reflection term, rendered with it and without it so the
     // difference is the term alone rather than 2% of a frame.
+    // A second submission of the identical frame, so frame-to-frame
+    // determinism can be compared at all.
+    std::vector<std::array<float, 4>> repeatedHdr;
+    auto repeatSubmitted = false;
     std::vector<std::array<float, 4>> termWithHdr;
     std::vector<std::array<float, 4>> termWithoutHdr;
     // The hit classification from the render the term is measured on, rather
@@ -6417,6 +6421,39 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
         if (!submitted) {
             std::cerr << "family-replay: submission failed diagnostic="
                       << rendered.status.diagnostic << '\n';
+        }
+        // The same frame again, into its own buffer. Nothing in the packets
+        // changes between the two, so the device has to produce the same
+        // picture twice -- and until it does, no temporal accumulation can
+        // converge on anything. A history folds this frame into the last, so
+        // a device that answers differently each time turns a still camera
+        // into a slow crawl no bound would attribute correctly.
+        //
+        // Nobody had checked. Every contract here renders one frame, which
+        // cannot distinguish "deterministic" from "happened to be right
+        // once".
+        if (submitted) {
+            repeatedHdr.assign(renderedHdr.size(),
+                std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f});
+            std::vector<scene::GBufferPixelV1> repeatedGbuffer(
+                rendered.gbuffer.size());
+            std::vector<raster::Rgba8> repeatedImage(
+                rendered.image.pixels.size());
+            auto repeatRequest = request;
+            repeatRequest.hdrData =
+                reinterpret_cast<std::uintptr_t>(repeatedHdr.data());
+            repeatRequest.gbufferData =
+                reinterpret_cast<std::uintptr_t>(repeatedGbuffer.data());
+            repeatRequest.outputData =
+                reinterpret_cast<std::uintptr_t>(repeatedImage.data());
+            abi::RasterStatusV1 repeatStatus{};
+            repeatStatus.structSize = sizeof(repeatStatus);
+            repeatSubmitted = static_cast<bool>(
+                host.RenderRasterFrame(repeatRequest, repeatStatus));
+            if (!repeatSubmitted) {
+                std::cerr << "family-replay: repeat submission failed"
+                          << (char)10;
+            }
         }
         // Two more renders that differ from each other only by the specular
         // bounce, so their difference is that term and nothing else. The
@@ -6764,6 +6801,26 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
         termWithHdr.size() >= pixelCount;
     std::uint64_t differingHdrPixels = 0;
     std::uint64_t differingHdrWithDivergentBounce = 0;
+    // Frame-to-frame determinism, which every temporal item depends on and
+    // which one-frame contracts cannot see. Exact rather than bounded: the
+    // two submissions carry identical packets, so any difference at all is
+    // the device answering differently to the same question, and a bound
+    // here would be a licence for exactly the drift a history would
+    // amplify.
+    std::uint64_t repeatDifferingPixels = 0;
+    float maximumRepeatError = 0.0f;
+    if (repeatSubmitted && repeatedHdr.size() >= pixelCount) {
+        for (std::size_t index = 0; index < pixelCount; ++index) {
+            auto pixelError = 0.0f;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                pixelError = std::max(pixelError,
+                    std::abs(renderedHdr[index][channel] -
+                        repeatedHdr[index][channel]));
+            }
+            maximumRepeatError = std::max(maximumRepeatError, pixelError);
+            if (pixelError != 0.0f) ++repeatDifferingPixels;
+        }
+    }
     auto normalsDiffer = false;
     auto lobeDiffers = false;
     if (submitted) {
@@ -7532,6 +7589,11 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
     }
 
     const auto passed = submitted && wrote &&
+        // The same frame twice must give the same picture. Exact, because
+        // the two submissions carry identical packets and a temporal history
+        // folds each frame into the last -- drift here compounds rather than
+        // averages out.
+        (!submitted || (repeatSubmitted && repeatDifferingPixels == 0)) &&
         // The specular bounce, measured as itself. Whole-frame statistics
         // cannot see it: it is around two per cent of the picture, and the
         // part a geometry hit contributes is two per cent of that again, so
@@ -7758,6 +7820,8 @@ if (options.shadows) {        scenePacket.visibility.clear();        for (std::s
               // be true -- which is exactly how a sky investigation spent an
               // afternoon reconciling four mutually inconsistent
               // measurements.
+              << " repeat-differing=" << repeatDifferingPixels
+              << " repeat-max-error=" << maximumRepeatError
               << " hdr-source="
               << (deterministic ? "bounce-free-pair" : "full-frame-pair")
               << " hdr-max-error=" << maximumHdrError
