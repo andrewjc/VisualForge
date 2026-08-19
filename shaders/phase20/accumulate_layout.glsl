@@ -56,6 +56,11 @@ layout(set = 0, binding = 2, std430) readonly buffer IndirectHistory
     GpuIndirectHistoryV1 records[];
 } indirectHistory;
 
+layout(set = 0, binding = 4, std430) writeonly buffer IndirectNextHistory
+{
+    GpuIndirectHistoryV1 records[];
+} indirectNextHistory;
+
 layout(set = 0, binding = 3, std430) writeonly buffer IndirectResults
 {
     GpuIndirectResultV1 records[];

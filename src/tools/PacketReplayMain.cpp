@@ -5217,14 +5217,15 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
             }
         }
     }
-    // The result becomes the history the next frame reads, on both sides, so
-    // the two walk the same path rather than being compared once from the
-    // same start.
+    // The oracle carries its own history forward. The device is not given
+    // one again: after the first frame the request stops supplying it, so
+    // what it accumulates onto is whatever it kept from the last dispatch.
+    // That is the property under test -- a device handed the answer every
+    // frame would agree without storing anything.
     for (std::uint32_t index = 0; index < kPixels; ++index) {
         history[index] = nextHistory[index];
-        historyRecords[index] =
-            gi::BuildGpuIndirectHistory(history[index]);
     }
+    request.indirectHistoryData = 0;
     }
 
     // The fixture has to actually reach the gates it claims to. A pass over

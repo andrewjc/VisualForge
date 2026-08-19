@@ -603,6 +603,14 @@ struct VulkanRasterRenderer::Impl
     // history and reads the result back in the same frame.
     Buffer indirectInput;
     Buffer indirectOutput;
+    // Two histories, swapped between dispatches. A pixel reads the history of
+    // whichever pixel its reprojection named and writes its own, so reading
+    // and writing one buffer would let an invocation overwrite what another
+    // still had to read. They persist across frames, which is what makes the
+    // device own the history rather than being handed one every dispatch.
+    Buffer indirectHistoryFront;
+    Buffer indirectHistoryBack;
+    bool indirectHistoryRetained{};
     std::uint32_t indirectPixelCount{};
     std::uint32_t indirectWidth_{};
     std::uint32_t indirectHeight_{};
@@ -958,6 +966,9 @@ void VulkanRasterRenderer::Impl::Reset() noexcept
         DestroyBuffer(deformReadback);
         DestroyBuffer(indirectInput);
         DestroyBuffer(indirectOutput);
+        DestroyBuffer(indirectHistoryFront);
+        DestroyBuffer(indirectHistoryBack);
+        indirectHistoryRetained = false;
         if (deformPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, deformPipeline, nullptr);
             deformPipeline = VK_NULL_HANDLE;
@@ -4161,7 +4172,6 @@ abi::Result VulkanRasterRenderer::Impl::PrepareIndirect(
         request.indirectPixelCount == 0 ||
         request.indirectCurrentData == 0 ||
         request.indirectPreviousData == 0 ||
-        request.indirectHistoryData == 0 ||
         request.indirectResultData == 0) {
         return abi::Result::Success;
     }
@@ -4188,8 +4198,18 @@ abi::Result VulkanRasterRenderer::Impl::PrepareIndirect(
     if (request.indirectResultCapacity < resultBytes) {
         return abi::Result::InvalidArgument;
     }
-    const auto uploadBytes = pixelBytes * 2 + historyBytes;
+    const auto uploadBytes = pixelBytes * 2;
 
+    for (auto* const buffer : {&indirectHistoryFront, &indirectHistoryBack}) {
+        if (buffer->capacity >= historyBytes) continue;
+        DestroyBuffer(*buffer);
+        const auto created = CreateHostBuffer(historyBytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, *buffer);
+        if (created != abi::Result::Success) return created;
+        // A reallocated history holds nothing, so whatever was retained is
+        // gone and the caller has to supply one again.
+        indirectHistoryRetained = false;
+    }
     if (indirectInput.capacity < uploadBytes) {
         DestroyBuffer(indirectInput);
         const auto created = CreateHostBuffer(uploadBytes,
@@ -4210,18 +4230,33 @@ abi::Result VulkanRasterRenderer::Impl::PrepareIndirect(
     std::memcpy(destination + pixelBytes, reinterpret_cast<const void*>(
         static_cast<std::uintptr_t>(request.indirectPreviousData)),
         pixelBytes);
-    std::memcpy(destination + pixelBytes * 2, reinterpret_cast<const void*>(
-        static_cast<std::uintptr_t>(request.indirectHistoryData)),
-        historyBytes);
+    // Supplied only when the caller has one to give. Otherwise the history
+    // the device kept from the last dispatch is used, which is the whole
+    // point of keeping it.
+    if (request.indirectHistoryData != 0) {
+        auto* const front =
+            static_cast<std::byte*>(indirectHistoryFront.mapped);
+        if (front == nullptr) return abi::Result::RasterRenderFailed;
+        std::memcpy(front, reinterpret_cast<const void*>(
+            static_cast<std::uintptr_t>(request.indirectHistoryData)),
+            historyBytes);
+        indirectHistoryRetained = true;
+    } else if (!indirectHistoryRetained) {
+        // Nothing supplied and nothing kept. Refused rather than accumulated
+        // onto whatever the allocation happened to contain.
+        return abi::Result::InvalidArgument;
+    }
 
     const std::array<VkDescriptorBufferInfo, gi::kIndirectBindingCount>
         bufferInfos{
             VkDescriptorBufferInfo{indirectInput.buffer, 0, pixelBytes},
             VkDescriptorBufferInfo{indirectInput.buffer, pixelBytes,
                 pixelBytes},
-            VkDescriptorBufferInfo{indirectInput.buffer, pixelBytes * 2,
+            VkDescriptorBufferInfo{indirectHistoryFront.buffer, 0,
                 historyBytes},
             VkDescriptorBufferInfo{indirectOutput.buffer, 0, resultBytes},
+            VkDescriptorBufferInfo{indirectHistoryBack.buffer, 0,
+                historyBytes},
         };
     std::array<VkWriteDescriptorSet, gi::kIndirectBindingCount> writes{};
     for (std::uint32_t index = 0; index < writes.size(); ++index) {
@@ -4234,6 +4269,9 @@ abi::Result VulkanRasterRenderer::Impl::PrepareIndirect(
     }
     vkUpdateDescriptorSets(device,
         static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    // Swapped after the descriptors are written, so the buffer this dispatch
+    // writes becomes the one the next dispatch reads.
+    std::swap(indirectHistoryFront, indirectHistoryBack);
     indirectPixelCount = static_cast<std::uint32_t>(pixels);
     indirectWidth_ = request.indirectWidth;
     indirectHeight_ = request.indirectHeight;

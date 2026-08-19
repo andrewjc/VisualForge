@@ -5955,3 +5955,50 @@ defect a mirror is blind to by construction -- both sides wrong the same way
 but whether either is doing the job.
 
 415 tests, 414 passing in both configurations.
+
+## History resources on the GPU
+
+Phase 20's first deferral reads: "No history resources on the GPU. Reproject,
+Accumulate, Variance and the epoch rules are implemented and tested, but
+nothing stores a per-pixel history yet." The device stores one now.
+
+It keeps two and swaps them between dispatches. One will not do: a pixel reads
+the history of whichever pixel its reprojection *named* and writes its own, so
+a single buffer lets an invocation overwrite what another has still to read,
+and which one wins depends on scheduling. That is the kind of defect that
+reproduces once in fifty runs.
+
+The caller supplies a history on the first dispatch and never again. After
+that the device accumulates onto what it kept, and a request that supplies
+neither -- no history given, none retained -- is refused rather than allowed
+to accumulate onto whatever the allocation happened to contain.
+
+Over eight frames the device's retained history and the oracle's independent
+walk agree exactly: zero mismatches on reason, length, mean and variance.
+
+| mutation | length mismatches | mean mismatches | convergence | verdict |
+| --- | --- | --- | --- | --- |
+| none | 0 | 0 | 0.816 | pass |
+| histories never swapped | 182 | 140 | 1.08 | **fail** |
+| history never written back | 182 | 140 | 0 | **fail** |
+
+The second row is worth reading twice. With no write-back the convergence
+reads **0** -- perfect, better than the correct build's 0.816 -- because every
+frame accumulates onto the same starting history and lands in the same place,
+and the last frame's distance from the target happens to be zero for the
+pixels that were accepted. A gate that only asked "did it converge" would have
+called that a success. It is caught by the per-step comparison instead, which
+is the other half of the pair: convergence catches what agreement cannot, and
+agreement catches what convergence cannot.
+
+### What is left of the item
+
+The accumulation half is done: the kernel, the resources, the retention, the
+epoch reset on reallocation, and eight frames of agreement. What remains is
+the *render path* -- the forward shader still traces its bounce fresh every
+frame and adds it straight to the HDR, so nothing feeds this history from a
+real frame. That needs the raw indirect written to a plane of its own, which
+is a G-buffer format change, and it is the honest remaining half rather than a
+detail.
+
+415 tests, 414 passing in both configurations.

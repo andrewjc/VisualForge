@@ -81,4 +81,14 @@ void main()
     result.variance = vfIndirectVariance(updated);
     result.samples = updated.samples;
     indirectResults.records[index] = result;
+
+    // The history this frame leaves behind, written to its own buffer so a
+    // pixel reprojecting onto a neighbour reads what that neighbour had
+    // last frame rather than whatever it has just produced. The two swap
+    // between dispatches.
+    GpuIndirectHistoryV1 carried;
+    carried.mean = updated.mean;
+    carried.secondMoment = updated.secondMoment;
+    carried.samples = updated.samples;
+    indirectNextHistory.records[index] = carried;
 }

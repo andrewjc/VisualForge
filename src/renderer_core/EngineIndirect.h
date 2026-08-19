@@ -231,7 +231,11 @@ struct alignas(16) GpuIndirectResultV1
 
 // One storage buffer each: current pixels, previous pixels, incoming history,
 // outgoing results.
-inline constexpr std::uint32_t kIndirectBindingCount = 4;
+// Five, not four: the history is read from the pixel the reprojection named
+// and written to this one, so one buffer cannot serve both. An invocation
+// that wrote where another still had to read would corrupt whichever ran
+// second, and the corruption would depend on scheduling.
+inline constexpr std::uint32_t kIndirectBindingCount = 5;
 
 [[nodiscard]] GpuIndirectPixelV1 BuildGpuIndirectPixel(
     const SurfaceSample& surface,
