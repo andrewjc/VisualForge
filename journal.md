@@ -6002,3 +6002,34 @@ is a G-buffer format change, and it is the honest remaining half rather than a
 detail.
 
 415 tests, 414 passing in both configurations.
+
+## The install is back on 1.11.221, verified rather than assumed
+
+The user downgraded through Steam's depot download; the copy into the install
+and the verification were done here.
+
+`download_depot 377160 377162 387388833281246371` places the file in
+`steamapps/content/app_377160/depot_377162` and does **not** touch the
+install, which is why the installed executable still read 1.11.240 after the
+download finished. The staged file was checked before anything was
+overwritten:
+
+```
+depot copy   1.11.221.0   55,293,864 bytes
+sha256       428F9996CC4248E26C0F62F9FDD3EAF0E5EB305834B67EE5996538E593218B61
+```
+
+Byte-identical to the fingerprint `TargetBuild_1_11_221` has recorded since
+phase 2. The 1.11.240 executable was copied to `Fallout4.exe.1-11-240.backup`
+in the game root before the swap -- with its own digest recorded,
+`FDCEF37A...072F8` -- and the installed file was hashed again afterwards
+rather than assumed to be what was copied.
+
+`unit::P02_installed_build_probe_matches_recorded_install` passes. **415 of
+415 in both configurations**, which is the first fully green suite since the
+game updated itself at 04:00.
+
+The rest of the install agrees: `f4se_1_11_221.dll` matches the runtime, the
+address library `version-1-11-221-0.bin` is present at its recorded
+10,425,304 bytes, and Steam's `AutoUpdateBehavior` is now `1` -- update only
+on launch -- so a background patch cannot silently undo this again.
