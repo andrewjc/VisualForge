@@ -5913,3 +5913,45 @@ harness renders two now, and the property it establishes is the one an
 accumulator needs and could not previously assume.
 
 415 tests, 414 passing in both configurations.
+
+## The accumulator runs eight frames now, and one mutation says why that matters
+
+`contract.indirect_accumulation` dispatched once and compared the result
+against the oracle. One step cannot show drift: an accumulator that is a
+fraction wrong per frame agrees to five decimals on the first frame and has
+visibly departed by the eighth, which is the failure a temporal pass actually
+produces.
+
+It runs eight frames now, each folding the previous result back in as the
+history the next one reads, on both sides, so the two walk the same path
+rather than being compared once from a shared start. All four per-step
+comparisons stay at zero across every frame.
+
+### A gate the per-step comparisons cannot be
+
+Running many frames also makes convergence observable, and convergence needs a
+different kind of check. With the sample held constant the accumulated mean
+must approach it -- measured `1.08` on the first frame and `0.816` on the
+eighth.
+
+The gate is `worstConvergence < firstConvergence`: an improvement, not a
+threshold. How close eight frames get is the preset's business -- it depends
+on the history length the preset allows -- and pinning a number here would be
+pinning that. What cannot be allowed is standing still.
+
+The mutation that justifies it: make the accumulator drop its new sample, on
+*both* sides at once.
+
+| | mean mismatches | first | last | verdict |
+| --- | --- | --- | --- | --- |
+| none | 0 | 1.08 | 0.816 | pass |
+| accumulator drops its sample, both sides | **0** | 1.45 | 1.45 | **fail** |
+
+Zero mismatches. Host and device drop the sample identically, so every
+comparison the contract had before this agrees perfectly, and the accumulator
+accumulates nothing. Only the convergence gate sees it. That is the shape of
+defect a mirror is blind to by construction -- both sides wrong the same way
+-- and it is worth having one check that does not ask whether the two agree
+but whether either is doing the job.
+
+415 tests, 414 passing in both configurations.

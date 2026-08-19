@@ -5136,14 +5136,6 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
     request.indirectWidth = kWidth;
     request.indirectHeight = kHeight;
     request.indirectEpochMatches = 1;
-    abi::RasterStatusV1 frameStatus{};
-    frameStatus.structSize = sizeof(frameStatus);
-    if (!host.RenderRasterFrame(request, frameStatus)) {
-        std::cerr << "indirect-replay: submission failed diagnostic="
-                  << frameStatus.diagnostic << (char)10;
-        return 8;
-    }
-
     std::uint32_t reasonMismatches = 0;
     std::uint32_t lengthMismatches = 0;
     std::uint32_t meanMismatches = 0;
@@ -5151,6 +5143,29 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
     auto worstMean = 0.0f;
     auto worstVariance = 0.0f;
     std::array<std::uint32_t, 7> reasonCounts{};
+    // Eight frames rather than one, each folding the last result back in as
+    // the history the next reads. One step cannot show drift: an accumulator
+    // that is a fraction wrong per frame agrees to five decimals on the first
+    // and has visibly departed by the eighth, which is exactly the failure a
+    // temporal pass would produce and a single dispatch would pass.
+    //
+    // It also lets convergence be checked at all. With the sample held
+    // constant the mean must approach it; a kernel that accumulated nothing
+    // would keep returning the first frame and satisfy every per-step
+    // comparison.
+    constexpr std::uint32_t kFrames = 8;
+    auto worstConvergence = 0.0f;
+    auto firstConvergence = 0.0f;
+    std::vector<gi::HistorySample> nextHistory(kPixels);
+    abi::RasterStatusV1 frameStatus{};
+    for (std::uint32_t frame = 0; frame < kFrames; ++frame) {
+    frameStatus = {};
+    frameStatus.structSize = sizeof(frameStatus);
+    if (!host.RenderRasterFrame(request, frameStatus)) {
+        std::cerr << "indirect-replay: submission failed diagnostic="
+                  << frameStatus.diagnostic << (char)10;
+        return 8;
+    }
     for (std::uint32_t index = 0; index < kPixels; ++index) {
         const auto x = index % kWidth;
         const auto y = index / kWidth;
@@ -5188,6 +5203,28 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
         // expression on the same inputs.
         if (meanError > 1.0e-5f) ++meanMismatches;
         if (varianceError > 1.0e-5f) ++varianceMismatches;
+        nextHistory[index] = expected;
+        // With the sample held constant the accepted pixels must walk
+        // toward it. Measured on the last frame only, because the early ones
+        // are legitimately far away -- that is what accumulating means.
+        if (reprojected.reason == gi::RejectReason::Accepted &&
+            (frame == 0 || frame + 1 == kFrames)) {
+            const auto target = gi::ClampRadiance(radiance[index], rules);
+            auto& worst = frame == 0 ? firstConvergence : worstConvergence;
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                worst = std::max(worst, std::abs(
+                    produced.mean[channel] - target[channel]));
+            }
+        }
+    }
+    // The result becomes the history the next frame reads, on both sides, so
+    // the two walk the same path rather than being compared once from the
+    // same start.
+    for (std::uint32_t index = 0; index < kPixels; ++index) {
+        history[index] = nextHistory[index];
+        historyRecords[index] =
+            gi::BuildGpuIndirectHistory(history[index]);
+    }
     }
 
     // The fixture has to actually reach the gates it claims to. A pass over
@@ -5212,11 +5249,24 @@ int RenderIndirectAccumulation(const FamilyRenderOptions& options)
     const auto passed = reasonMismatches == 0 && lengthMismatches == 0 &&
         meanMismatches == 0 && varianceMismatches == 0 &&
         reasonsSeen >= 6 && frameStatus.validationErrorCount == 0 &&
+        // The accumulated mean has to move toward the sample it is
+        // accumulating. Stated as an improvement rather than a threshold
+        // because the rate is the preset's business, not this fixture's:
+        // how close eight frames get depends on the history length the
+        // preset allows, and pinning a number here would be pinning that.
+        // What cannot be allowed is standing still, which is what an
+        // accumulator that drops its new sample looks like -- and it would
+        // satisfy every per-step comparison above, because host and device
+        // would drop it identically.
+        worstConvergence < firstConvergence &&
         lifecyclePass;
     std::cout << "indirect-replay extent=" << kWidth << char{120} << kHeight
               << " reason-mismatches=" << reasonMismatches
               << " length-mismatches=" << lengthMismatches
               << " mean-mismatches=" << meanMismatches
+              << " frames=" << kFrames
+              << " first-convergence=" << firstConvergence
+              << " worst-convergence=" << worstConvergence
               << " variance-mismatches=" << varianceMismatches
               << " max-mean-error=" << worstMean
               << " max-variance-error=" << worstVariance
