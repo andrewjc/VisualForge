@@ -544,6 +544,11 @@ struct VulkanRasterRenderer::Impl
     // the HDR attachment. No vertex buffer and no depth interaction, so it
     // needs a pipeline of its own rather than a permutation of the scene one.
     VkPipeline skyPipeline{VK_NULL_HANDLE};
+    // How many frames actually recorded the sky. Reported because "the sky is
+    // in the build" and "the sky ran" are different claims, and a uniform
+    // background cannot tell an ambient sky from the clear colour it
+    // replaced.
+    std::uint64_t skyDrawCount{};
     // One per blended mode, indexed by blend::BlendMode minus one. Blend
     // factors are pipeline state in core Vulkan, so a single pipeline cannot
     // serve additive and multiply.
@@ -3217,6 +3222,13 @@ abi::Result VulkanRasterRenderer::Impl::BuildAccelerationStructures(
         message += std::to_string(scenePacket.objects.size());
         message += " instances=";
         message += std::to_string(scenePacket.instances.size());
+        // Whether the sky pass has ever recorded. A uniform background cannot
+        // distinguish an ambient sky from the clear colour it replaced, so
+        // the count says which of the two is being looked at.
+        message += " sky-draws=";
+        message += std::to_string(skyDrawCount);
+        message += " lighting-active=";
+        message += phase17LightingActive ? "yes" : "no";
         callbacks.log(callbacks.userData, 1u, message.c_str());
     }
     const auto transformBytes =
@@ -5594,6 +5606,7 @@ abi::Result VulkanRasterRenderer::Impl::RecordAndSubmit(
         layout.materialOffset <= std::numeric_limits<std::uint32_t>::max()) {
         const auto skyDynamicOffset =
             static_cast<std::uint32_t>(layout.materialOffset);
+        ++skyDrawCount;
         beginRegion("phase17.sky", {0.4f, 0.6f, 0.95f, 1.0f});
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
             skyPipeline);

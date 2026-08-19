@@ -6033,3 +6033,60 @@ The rest of the install agrees: `f4se_1_11_221.dll` matches the runtime, the
 address library `version-1-11-221-0.bin` is present at its recorded
 10,425,304 bytes, and Steam's `AutoUpdateBehavior` is now `1` -- update only
 on launch -- so a background patch cannot silently undo this again.
+
+## Live: the world mirrors, and the sun is read from the wrong buffer
+
+Two live runs on the restored 1.11.221 install. Sanctuary renders through the
+Vulkan mirror -- 1037 acceleration plans over 885 objects, 3660 frames, 47.1%
+of D3D draws suppressed, and the loading-screen prop comes through
+front-facing and readable, which is the winding fix holding up in a real
+frame.
+
+The frame is unlit and its sky is flat. The cause is now measured rather than
+guessed, and it took an instrument because I got it wrong twice by reading.
+
+**First I said no lights were captured**, from `lighting-us=21` in the stage
+timings. That is not evidence of anything -- 21 microseconds is what building
+two light records costs.
+
+**Then I corrected myself the wrong way**, from
+`renderer-lighting: valid=yes bytes=752`. That line reports the captured
+*constant buffer*, not the light packet. Two readings, both confident, both
+wrong.
+
+The instrument settles it. The backend now reports whether the sky pass
+actually recorded, because a uniform background cannot distinguish an ambient
+sky from the clear colour it would have replaced:
+
+```
+sky-draws=0 lighting-active=no        (2065 frames)
+renderer-mirror-light: source=cbVolume status=direction-degenerate
+                       bytes=0 candidates=1 layouts=9 samples=20
+```
+
+So: the light packet is **empty**, `hasLights` is false, `phase17LightingActive`
+is false, the sky pass never runs, and every surface is drawn on the ambient
+term alone. One cause, three symptoms.
+
+### Why the packet is empty
+
+The mirror reads `g_vLightDir` and `g_vLightColor` out of a constant buffer
+named `cbVolume`. It finds the buffer, finds the fields -- the read is
+reflection-driven, so no offset is being guessed -- and finds one candidate in
+the world where the loading screen had none. The direction it reads is
+zero-length, so `SelectDirectionalLight` refuses it, which is the correct
+refusal: three floats are a direction only if they have unit length, and
+accepting a zero would give a confident sun pointing nowhere.
+
+`cbVolume` is the *volumetric* lighting buffer. Its light direction is
+populated when volumetrics are running, and zero otherwise, which is why the
+capture path is complete and correct and still yields nothing.
+
+### The next step, and what it is not
+
+Not an offset hunt: the read is already reflection-driven by field name. What
+is needed is the buffer that always carries the sun. The way to find it is the
+one the camera search used -- enumerate every captured constant buffer, report
+each field holding a unit-length three-vector with its buffer and field name,
+and let the observation name the source instead of another candidate being
+proposed and tested one at a time.
